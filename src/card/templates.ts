@@ -1,3 +1,5 @@
+import { COMMAND_REGISTRY, type CommandSpec } from '../commands/registry';
+
 interface ButtonSpec {
   text: string;
   value: Record<string, unknown>;
@@ -171,30 +173,25 @@ export function resumeCard(cwd: string, entries: ResumeEntry[]): object {
   return shell('🔁 恢复历史会话', elements);
 }
 
+/**
+ * One markdown bullet per command, generated from the registry. `admin`
+ * commands get a 🔒 marker. `aliases` are folded into the command's own line
+ * (`/new` `/reset`) so the list stays one entry per real command.
+ */
+function commandBullet(spec: CommandSpec): string {
+  const tokens = [spec.name, ...(spec.aliases ?? [])].map((t) => `\`/${t}\``).join(' ');
+  const lock = spec.admin ? ' 🔒' : '';
+  return `- ${tokens}${lock} — ${spec.summary}`;
+}
+
 export function helpCard(agentName = 'Agent'): object {
   const escapedAgentName = escapeMd(agentName);
   return shell('💡 使用帮助', [
     divMd(
       [
-        '**命令列表**',
+        '**命令列表**（🔒 = 仅管理员）',
         '',
-        '- `/new` `/reset` — 清空当前 chat 的会话',
-        '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
-        '- `/resume [N]` — 列出并恢复历史会话（最多 N 条）',
-        '- `/cd <path>` — 切换工作目录（会重置 session）',
-        '- `/ws list|save <name>|use <name>|remove <name>` — 工作目录',
-        '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
-        '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
-        '- `/status` — 当前状态',
-        '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
-        '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
-        '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
-        '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',
-        '- `/ps` — 列出本机所有 bot,标识当前正在回复的那个',
-        '- `/exit <id|#>` — 关掉指定 bot(用 `/ps` 看 id/序号)',
-        '- `/reconnect` — 强制重连 WebSocket(网络抖动后 bot 没反应时用)',
-        `- \`/doctor [描述]\` — 把日志和描述交给 ${escapedAgentName} 自助诊断`,
-        '- `/help` — 本帮助',
+        ...COMMAND_REGISTRY.map(commandBullet),
         '',
         `其他内容直接交给 ${escapedAgentName}。`,
       ].join('\n'),
@@ -207,6 +204,39 @@ export function helpCard(agentName = 'Agent'): object {
       { text: '🆕 新会话', value: { cmd: 'new' } },
     ]),
   ]);
+}
+
+/**
+ * Discovery card for a `/he`-style partial. Lists every command whose name or
+ * alias prefix-matches `partial`, each with a clickable button that runs it.
+ * Commands needing arguments (`/cd`, `/ws`, `/account`, `/config`, `/timeout`,
+ * `/exit`, `/invite`, `/remove`) don't auto-run — clicking them would fail or
+ * open the wrong default — so they show a "查看用法" hint instead of a run
+ * button. Argument-free commands get a "▸ 运行" button that dispatches直接.
+ */
+const NEEDS_ARGS = new Set(['cd', 'ws', 'account', 'config', 'timeout', 'exit', 'invite', 'remove']);
+
+export function commandMatchCard(partial: string, matches: CommandSpec[]): object {
+  const needle = partial.replace(/^\//, '');
+  const elements: object[] = [
+    divMd(`输入 \`/${escapeMd(needle)}\` 匹配到 **${matches.length}** 个命令（🔒 = 仅管理员）：`),
+    HR,
+  ];
+  matches.forEach((spec, i) => {
+    const lock = spec.admin ? ' 🔒' : '';
+    elements.push(divMd(`\`/${spec.name}\`${lock} — ${spec.summary}`));
+    if (NEEDS_ARGS.has(spec.name)) {
+      elements.push(divMd(`_需要参数，发送 \`/${spec.name}\` 查看用法_`));
+    } else {
+      elements.push(
+        actions([
+          { text: `▸ 运行 /${spec.name}`, value: { cmd: spec.name }, style: i === 0 ? 'primary' : 'default' },
+        ]),
+      );
+    }
+    if (i < matches.length - 1) elements.push(HR);
+  });
+  return shell('🔍 命令匹配', elements);
 }
 
 function escapeMd(s: string): string {
