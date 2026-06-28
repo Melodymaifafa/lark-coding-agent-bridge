@@ -23,7 +23,8 @@ import {
 import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
-import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import { commandMatchCard, helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import { COMMAND_REGISTRY, matchCommands } from './registry';
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -178,6 +179,7 @@ const handlers: Record<string, Handler> = {
   '/remove': handleRemove,
 };
 
+
 /**
  * Commands that can mutate credentials, lifecycle, filesystem reach, or
  * surface sensitive runtime state. Gated by unified access policy; runtime
@@ -200,6 +202,21 @@ function isAdminCommand(cmd: string): boolean {
   return ADMIN_COMMANDS.has(cmd.startsWith('/') ? cmd : `/${cmd}`);
 }
 
+// Invariant (checked at module load): every command the registry advertises in
+// help / discovery cards must have a real handler, and its `admin` flag must
+// agree with ADMIN_COMMANDS. Throws on drift so a registry entry can never
+// claim a command that the dispatcher won't actually run or gate.
+for (const spec of COMMAND_REGISTRY) {
+  for (const token of [spec.name, ...(spec.aliases ?? [])]) {
+    if (!handlers[`/${token}`]) {
+      throw new Error(`command registry advertises /${token} but no handler is registered`);
+    }
+    if (Boolean(spec.admin) !== ADMIN_COMMANDS.has(`/${token}`)) {
+      throw new Error(`command registry admin flag for /${token} disagrees with ADMIN_COMMANDS`);
+    }
+  }
+}
+
 export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const trimmed = ctx.msg.content.trim();
   if (!trimmed.startsWith('/')) return false;
@@ -207,7 +224,23 @@ export async function tryHandleCommand(ctx: CommandContext): Promise<boolean> {
   const cmd = parts[0] ?? '';
   const args = parts.slice(1).join(' ');
   const h = handlers[cmd];
-  if (!h) return false;
+  if (!h) {
+    // No exact command. If the user typed a `/he`-style prefix that matches
+    // one or more real commands (and nothing else on the line), this is a
+    // discovery query — reply with a card listing the matches instead of
+    // forwarding "/he" to the agent. Requires the whole message to be just
+    // the partial token (no args), so normal prose starting with "/" still
+    // reaches the agent.
+    if (parts.length === 1 && cmd.length > 1) {
+      const matches = matchCommands(cmd);
+      if (matches.length > 0) {
+        const card = commandMatchCard(cmd, matches);
+        await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+        return true;
+      }
+    }
+    return false;
+  }
   if (
     isAdminCommand(cmd) &&
     !canRunAdminCommand(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId).ok

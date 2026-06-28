@@ -299,6 +299,36 @@ describe('Bridge command contracts', () => {
     expect(root?.profiles.claude?.access.allowedUsers).not.toContain('ou-alice');
   });
 
+  it('replies with a discovery card for a partial command prefix', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/he')).resolves.toBe(true);
+    const card = JSON.stringify(lastContent(h.channel));
+    expect(card).toContain('命令匹配');
+    expect(card).toContain('/help');
+    // The matched command should offer a run button dispatching the command.
+    expect(card).toContain('"cmd":"help"');
+  });
+
+  it('does not treat prose starting with a slash as a command', async () => {
+    const h = await createHarness();
+    h.channel.sent.length = 0;
+
+    // Sentence that happens to start with a partial token ("/he ...") plus
+    // more words — must fall through to the agent (returns false), not get
+    // hijacked into a discovery card. Only a bare partial token triggers it.
+    await expect(h.run('/he me write a function')).resolves.toBe(false);
+    expect(h.channel.sent).toHaveLength(0);
+  });
+
+  it('falls through for a slash prefix that matches no command', async () => {
+    const h = await createHarness();
+    h.channel.sent.length = 0;
+
+    await expect(h.run('/zzz')).resolves.toBe(false);
+    expect(h.channel.sent).toHaveLength(0);
+  });
+
   it('adds every known bot group through /invite all group', async () => {
     const h = await createHarness();
     h.controls.knownChats = [
