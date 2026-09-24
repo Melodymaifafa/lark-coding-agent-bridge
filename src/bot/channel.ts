@@ -49,6 +49,7 @@ import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
+import { rememberSkillCatalog } from '../skills/registry';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -750,6 +751,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (evt.type === 'system' && evt.threadId) {
       log.info('session', 'set-thread', { threadId: evt.threadId });
+    }
+    // Claude Code reports its live skill list on every run's init event.
+    // Caching it here makes `/skills` instant and exact after the first
+    // turn, so the command only pays for a probe spawn on a cold scope.
+    if (evt.type === 'system' && evt.skills) {
+      rememberSkillCatalog(capability.agentId, evt.cwd ?? cwd, evt.skills);
     }
   };
 
