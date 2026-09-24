@@ -23,6 +23,14 @@ import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 const BRIDGE_CALLBACK_MARKER = '__bridge_cb';
 const LEGACY_CLAUDE_CALLBACK_MARKER = '__claude_cb';
 
+/** Button payload `cmd` used by the `/skills` card to run an agent skill. */
+const SKILL_RUN_CMD = 'skills.run';
+/**
+ * A skill name is `word` or `plugin:word`. Anchored so a crafted payload
+ * can't smuggle spaces or newlines into the prompt we hand the agent.
+ */
+const SKILL_NAME_RE = /^[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?$/;
+
 export interface CardDispatchDeps {
   channel: LarkChannel;
   evt: CardActionEvent;
@@ -82,6 +90,30 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   }
 
   const cmd = typeof payload.cmd === 'string' ? payload.cmd : '';
+
+  // `/skills` card → "▸ 运行 /<skill>". A skill is the AGENT's, not a bridge
+  // command, so there is no handler to call: the click has to reach the
+  // agent as if the user had typed `/<skill>`. Queue it like any inbound
+  // message — same scope, same debounce, same run policy.
+  if (cmd === SKILL_RUN_CMD) {
+    const skill = typeof payload.arg === 'string' ? payload.arg.trim() : '';
+    if (!skill || !SKILL_NAME_RE.test(skill)) {
+      log.warn('cardAction', 'skill-run-bad-arg', { scope, arg: String(payload.arg).slice(0, 60) });
+      return;
+    }
+    if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
+      return;
+    }
+    log.info('cardAction', 'skill-run', { skill, scope });
+    deps.pending.push(scope, {
+      ...makeFakeMsg(deps.evt, threadId),
+      chatType: mode === 'p2p' ? 'p2p' : 'group',
+      content: `/${skill}`,
+      rawContentType: 'card_action',
+    });
+    return;
+  }
+
   if (cmd) {
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
