@@ -23,6 +23,7 @@ import {
   runServiceStop,
   runServiceUnregister,
 } from './commands/service';
+import { runSend } from './commands/send';
 import { runStart } from './commands/start';
 
 const program = new Command();
@@ -56,6 +57,16 @@ program
     skipCheckLarkCli?: boolean;
   }) => {
     await runStart(opts);
+  });
+
+program
+  .command('send')
+  .description('Send one card as the profile\'s bot and exit; prints the message_id (for scheduled jobs)')
+  .requiredOption('--card <file>', 'card JSON file')
+  .requiredOption('--to <id>', 'open_id (ou_...), chat_id (oc_...), or "admin" for the profile\'s first admin')
+  .option('--profile <name>', 'profile name (defaults to active profile)')
+  .action(async (opts: { card: string; to: string; profile?: string }) => {
+    console.log(await runSend(opts));
   });
 
 program

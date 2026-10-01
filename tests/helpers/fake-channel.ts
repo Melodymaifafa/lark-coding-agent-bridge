@@ -20,6 +20,8 @@ export interface FakeRawClientRequest {
 export interface FakeChannel {
   readonly sent: FakeChannelMessage[];
   readonly streams: FakeChannelStream[];
+  /** Cards replaced in place via `updateCard` (im.v1.message.patch). */
+  readonly patched: Array<{ messageId: string; card: unknown }>;
   /**
    * Maps a messageId to the `thread_id` that `fetchRawMessage` should report
    * for it — mirrors the raw `im.v1.message.get` items[0].thread_id that the
@@ -50,6 +52,7 @@ export interface FakeChannel {
   };
   createCard(cardJson: unknown): Promise<{ cardId: string }>;
   updateCardById(cardId: string, cardJson: unknown, sequence: number): Promise<void>;
+  updateCard(messageId: string, card: unknown): Promise<void>;
   send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
 }
@@ -57,6 +60,7 @@ export interface FakeChannel {
 export function createFakeChannel(): FakeChannel {
   const sent: FakeChannelMessage[] = [];
   const streams: FakeChannelStream[] = [];
+  const patched: Array<{ messageId: string; card: unknown }> = [];
   const requests: FakeRawClientRequest[] = [];
   const rawThreadIds = new Map<string, string>();
   const cardById = new Map<string, unknown>();
@@ -77,6 +81,7 @@ export function createFakeChannel(): FakeChannel {
   return {
     sent,
     streams,
+    patched,
     rawThreadIds,
     async fetchRawMessage(messageId: string): Promise<Array<{ thread_id?: string }>> {
       const threadId = rawThreadIds.get(messageId);
@@ -125,6 +130,9 @@ export function createFakeChannel(): FakeChannel {
       const cardId = `card_fake_${nextCard++}`;
       cardById.set(cardId, cardJson);
       return { cardId };
+    },
+    async updateCard(messageId: string, card: unknown): Promise<void> {
+      patched.push({ messageId, card });
     },
     async updateCardById(cardId: string, cardJson: unknown, sequence: number): Promise<void> {
       requests.push({ method: 'cardkit.v1.card.update', params: { cardId, cardJson, sequence } });

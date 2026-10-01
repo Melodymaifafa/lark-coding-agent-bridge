@@ -1,5 +1,7 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { CardActionEvent } from '@larksuite/channel';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
@@ -115,6 +117,43 @@ describe('signed card callback dispatch', () => {
   });
 });
 
+describe('card swap callbacks', () => {
+  afterEach(async () => {
+    await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  const card = { elements: [{ tag: 'markdown', content: 'hint 1' }] };
+  const click = { cmd: 'card.swap', deck: 'quiz', id: 'day1', state: 'hint' };
+
+  async function stageHint(h: Harness): Promise<void> {
+    await mkdir(join(h.tmp.root, 'card-swap', 'quiz'), { recursive: true });
+    await writeFile(join(h.tmp.root, 'card-swap', 'quiz', 'day1.hint.json'), JSON.stringify(card));
+  }
+
+  it('swaps the clicked card to its pre-rendered state', async () => {
+    const h = await createHarness();
+    await stageHint(h);
+
+    await h.dispatch(click);
+
+    await vi.waitFor(() => expect(h.channel.patched).toEqual([{ messageId: 'om_card', card }]));
+  });
+
+  it('ignores swaps from users the bot does not answer, and malformed ids', async () => {
+    const dm = await createHarness({ chatMode: 'p2p' });
+    await stageHint(dm);
+    await dm.dispatch(click);
+
+    const group = await createHarness();
+    await stageHint(group);
+    await group.dispatch({ ...click, id: '../day1' });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(dm.channel.patched).toEqual([]);
+    expect(group.channel.patched).toEqual([]);
+  });
+});
+
 type Harness = {
   tmp: TmpProfile;
   channel: FakeChannel;
@@ -214,6 +253,7 @@ async function createHarness(
         chatModeCache,
         ...(opts.callbackAuth === false ? {} : { callbackAuth: auth }),
         callbackPolicyFingerprint: 'fp-1',
+        cardSwap: { root: join(tmp.root, 'card-swap'), settleMs: 0 },
       }),
   };
 }
