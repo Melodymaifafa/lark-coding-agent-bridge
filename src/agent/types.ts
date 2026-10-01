@@ -3,8 +3,32 @@ import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissio
 
 export type { ClaudePermissionMode } from '../config/permissions';
 
+/** A plugin the agent has loaded, with the directory it was installed to. */
+export interface AgentPluginRef {
+  name: string;
+  path: string;
+}
+
+/**
+ * The skills an agent currently exposes. `names` are exactly what a user
+ * types after the slash (`handoff`, `vercel:deploy`); `plugins` lets the
+ * caller find a namespaced skill's `SKILL.md` on disk.
+ */
+export interface AgentSkillListing {
+  names: string[];
+  plugins: AgentPluginRef[];
+}
+
 export type AgentEvent =
-  | { type: 'system'; sessionId?: string; threadId?: string; cwd?: string; model?: string }
+  | {
+      type: 'system';
+      sessionId?: string;
+      threadId?: string;
+      cwd?: string;
+      model?: string;
+      /** Present on Claude Code's `init` event — the run's live skill list. */
+      skills?: AgentSkillListing;
+    }
   | { type: 'text'; delta: string }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -88,4 +112,11 @@ export interface AgentAdapter {
    * Adapters that don't bake identity into their prompts may omit it.
    */
   setBotIdentity?(identity: AgentBotIdentity): void;
+  /**
+   * Enumerate the skills this agent exposes in `cwd`, without running a
+   * turn. Only implemented by agents that have skills at all — `/skills`
+   * tells the user the agent has none when this is absent, which is
+   * different from "the lookup failed".
+   */
+  listSkills?(cwd: string): Promise<AgentSkillListing>;
 }

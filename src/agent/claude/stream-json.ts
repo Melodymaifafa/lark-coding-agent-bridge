@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../types';
+import type { AgentEvent, AgentPluginRef, AgentSkillListing } from '../types';
 
 interface ContentBlock {
   type: string;
@@ -25,6 +25,34 @@ interface ClaudeRawEvent {
     cache_read_input_tokens?: number;
   };
   total_cost_usd?: number;
+  skills?: unknown;
+  plugins?: unknown;
+}
+
+/**
+ * Pull the skill listing out of an `init` event. Claude Code puts the skill
+ * names the run can use in `skills`, and the loaded plugins (with install
+ * paths, needed to resolve a `plugin:skill` description) in `plugins`.
+ * Returns undefined when the field is missing — older CLIs won't have it,
+ * and a missing list must not read as "this agent has no skills".
+ */
+export function readSkillListing(raw: {
+  skills?: unknown;
+  plugins?: unknown;
+}): AgentSkillListing | undefined {
+  if (!Array.isArray(raw.skills)) return undefined;
+  const names = raw.skills.filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const plugins: AgentPluginRef[] = [];
+  if (Array.isArray(raw.plugins)) {
+    for (const entry of raw.plugins) {
+      if (!entry || typeof entry !== 'object') continue;
+      const { name, path } = entry as { name?: unknown; path?: unknown };
+      if (typeof name === 'string' && typeof path === 'string' && name && path) {
+        plugins.push({ name, path });
+      }
+    }
+  }
+  return { names, plugins };
 }
 
 export function* translateEvent(raw: unknown): Generator<AgentEvent> {
@@ -32,11 +60,13 @@ export function* translateEvent(raw: unknown): Generator<AgentEvent> {
   const evt = raw as ClaudeRawEvent;
 
   if (evt.type === 'system' && evt.subtype === 'init') {
+    const skills = readSkillListing(evt);
     yield {
       type: 'system',
       sessionId: evt.session_id,
       cwd: evt.cwd,
       model: evt.model,
+      ...(skills ? { skills } : {}),
     };
     return;
   }
