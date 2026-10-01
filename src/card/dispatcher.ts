@@ -5,6 +5,7 @@ import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
 import type { ProcessPool } from '../bot/process-pool';
 import type { CallbackAuth } from './callback-auth';
+import { CARD_SWAP_CMD, parseCardSwap, swapCard, type CardSwapOptions } from './swap';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
 import { log } from '../core/logger';
 import { canUseDm, canUseGroup } from '../policy/access';
@@ -39,6 +40,8 @@ export interface CardDispatchDeps {
   callbackAuth?: CallbackAuth;
   callbackPolicyFingerprint?: string;
   callbackPolicyFingerprintForScope?: (scope: string) => string | undefined;
+  /** Test hook: where card-swap state files live and how long to wait. */
+  cardSwap?: CardSwapOptions;
 }
 
 export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
@@ -78,6 +81,19 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info('cardAction', 'skip-legacy-callback-marker', { scope });
+    return;
+  }
+
+  if (payload.cmd === CARD_SWAP_CMD) {
+    const req = parseCardSwap(payload);
+    if (!req) {
+      log.warn('cardAction', 'card-swap-invalid', { scope });
+      return;
+    }
+    // Detached on purpose: the update must land after this handler returns (see swap.ts).
+    void swapCard(deps.channel, deps.evt.messageId, req, deps.cardSwap).catch((err) =>
+      log.fail('cardSwap', err, { scope }),
+    );
     return;
   }
 
