@@ -48,6 +48,8 @@ describe('/skills — agent skill discovery', () => {
     // Every entry offers a click-to-run button.
     expect(card).toContain('"cmd":"skills.run"');
     expect(card).toContain('"arg":"handoff"');
+    // …bound to the cwd it was listed for, so a click after `/cd` is caught.
+    expect(card).toContain(`"cwd":${JSON.stringify(h.cwd)}`);
     expect(h.agent.listSkillsCalls).toHaveLength(1);
   });
 

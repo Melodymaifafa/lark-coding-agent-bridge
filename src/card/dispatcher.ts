@@ -13,6 +13,7 @@ import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
+import { SKILL_RUN_CONTENT_TYPE } from '../skills/registry';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -93,8 +94,9 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
   // `/skills` card → "▸ 运行 /<skill>". A skill is the AGENT's, not a bridge
   // command, so there is no handler to call: the click has to reach the
-  // agent as if the user had typed `/<skill>`. Queue it like any inbound
-  // message — same scope, same debounce, same run policy.
+  // agent as an explicit `/<skill>` invocation. Queue it on the scope —
+  // same debounce, same run policy — marked so the batch runner sends it
+  // as the bare prompt (see SKILL_RUN_CONTENT_TYPE).
   if (cmd === SKILL_RUN_CMD) {
     const skill = typeof payload.arg === 'string' ? payload.arg.trim() : '';
     if (!skill || !SKILL_NAME_RE.test(skill)) {
@@ -104,12 +106,25 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
     }
+    // The card listed the skills of one cwd. If the scope has moved since
+    // (`/cd`, `/ws use`), the same name could run a different skill or none
+    // at all — have the user re-list rather than guess.
+    const cardCwd = typeof payload.cwd === 'string' ? payload.cwd : '';
+    const cwd = deps.workspaces.cwdFor(scope) ?? deps.controls.profileConfig.workspaces.default;
+    if (!cardCwd || cardCwd !== cwd) {
+      log.info('cardAction', 'skill-run-stale-cwd', { skill, scope });
+      await replyToClick(
+        deps,
+        '⚠️ 这张技能卡是在另一个工作目录下列出的，当前目录已经变了，没有运行。请重新发送 `/skills` 再点。',
+      );
+      return;
+    }
     log.info('cardAction', 'skill-run', { skill, scope });
     deps.pending.push(scope, {
       ...makeFakeMsg(deps.evt, threadId),
       chatType: mode === 'p2p' ? 'p2p' : 'group',
       content: `/${skill}`,
-      rawContentType: 'card_action',
+      rawContentType: SKILL_RUN_CONTENT_TYPE,
     });
     return;
   }
@@ -283,6 +298,14 @@ function verifyBridgeToken(
     return false;
   }
   return true;
+}
+
+async function replyToClick(deps: CardDispatchDeps, markdown: string): Promise<void> {
+  try {
+    await deps.channel.send(deps.evt.chatId, { markdown }, { replyTo: deps.evt.messageId });
+  } catch (err) {
+    log.fail('cardAction', err, { step: 'reply' });
+  }
 }
 
 function isSignedBridgeCallback(payload: Record<string, unknown>): boolean {

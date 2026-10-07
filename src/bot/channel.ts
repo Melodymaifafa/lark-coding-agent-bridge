@@ -49,7 +49,7 @@ import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
-import { rememberSkillCatalog } from '../skills/registry';
+import { isSkillRunMessage, rememberSkillCatalog } from '../skills/registry';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -247,10 +247,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // unblock arms a fresh quiet-window timer. Net effect: at most one run per
   // chat in flight, and everything sent during a run merges into the next
   // batch (only flushed once 600ms of silence has passed *after* the run).
-  const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+  const pending = new PendingQueue(DEBOUNCE_MS, (scope, queued) => {
+    const batch = takeRunnableBatch(queued);
     const firstMsg = batch[0];
     if (!firstMsg) return;
     pending.block(scope);
+    // Whatever was split off waits, still in order, for the next flush.
+    for (const msg of queued.slice(batch.length)) pending.push(scope, msg);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info('flush', 'start', { scope, batchSize: batch.length });
       try {
@@ -1151,6 +1154,19 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The leading run of `queued` that can share one agent turn. A `/skills`
+ * run click must be its own turn — its prompt is the bare `/<skill>` (see
+ * `buildPrompt`), so it can't be merged with other messages — and plain
+ * messages queued ahead of it run first, as usual.
+ */
+function takeRunnableBatch(queued: NormalizedMessage[]): NormalizedMessage[] {
+  const first = queued[0];
+  if (!first || isSkillRunMessage(first)) return queued.slice(0, 1);
+  const nextSkillRun = queued.findIndex(isSkillRunMessage);
+  return nextSkillRun === -1 ? queued : queued.slice(0, nextSkillRun);
+}
+
 function buildPrompt(
   batch: NormalizedMessage[],
   attachments: LocalAttachment[],
@@ -1159,6 +1175,9 @@ function buildPrompt(
 ): string {
   const first = batch[0];
   if (!first) return '';
+  // Claude Code only recognises `/<skill>` at the very start of the prompt;
+  // wrapped in `<user_input>` it is just chat text the model may ignore.
+  if (isSkillRunMessage(first)) return first.content;
 
   const fileKeys = batch.flatMap((m) => m.resources.map((r) => r.fileKey));
   // When the debounce window merged messages (possibly from several senders —

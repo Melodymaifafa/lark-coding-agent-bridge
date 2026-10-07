@@ -316,7 +316,9 @@ export function skillsCard(input: SkillsCardInput): object {
       actions([
         {
           text: `▸ 运行 /${spec.name}`,
-          value: { cmd: 'skills.run', arg: spec.name },
+          // The skill set is per-cwd: carry the one this list was built for
+          // so a click after `/cd` can't run a different same-named skill.
+          value: { cmd: 'skills.run', arg: spec.name, cwd },
           style: i === 0 ? 'primary' : 'default',
         },
       ]),

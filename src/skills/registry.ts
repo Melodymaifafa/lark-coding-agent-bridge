@@ -42,6 +42,19 @@ export interface SkillCatalog {
   capturedAt: number;
 }
 
+/**
+ * `rawContentType` stamped on a `/skills` card run click queued for the
+ * agent. Claude Code only treats `/<skill>` as an invocation when it is the
+ * very start of the prompt, so the batch runner sends such a message bare
+ * and on its own instead of wrapping it into a batch prompt. Not a Feishu
+ * message type, so no inbound message can carry it.
+ */
+export const SKILL_RUN_CONTENT_TYPE = 'skill_run';
+
+export function isSkillRunMessage(msg: { rawContentType: string }): boolean {
+  return msg.rawContentType === SKILL_RUN_CONTENT_TYPE;
+}
+
 /** Longest summary we keep; anything past this is elided on one line. */
 const SUMMARY_MAX_CHARS = 110;
 
