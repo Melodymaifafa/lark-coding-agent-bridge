@@ -126,7 +126,7 @@ export function describeSkills(listing: AgentSkillListing, cwd: string): SkillSp
   const roots = projectRoots(cwd);
   const lookup = skillLookup();
   const listed = new Set(listing.names);
-  const loaded = loadedSyncBuckets(listed);
+  const loaded = loadedSyncBuckets(listed, roots, lookup);
   const specs = listing.names.map((name) =>
     describeSkill(name, listing.plugins, roots, lookup, listed, loaded),
   );
@@ -147,9 +147,11 @@ function describeSkill(
     const prefix = name.slice(0, sep);
     const bare = name.slice(sep + 1);
     // The reserved full name runs the synced skill even when a plugin by
-    // that name has a namesake, so the card must describe the synced copy.
+    // that name has a namesake, so the card must describe the synced copy —
+    // the one this session loaded, not another account's stale namesake.
+    // Every bucket is the fallback for when none reads as loaded.
     if (prefix === SYNCED_SKILL_NAMESPACE) {
-      const synced = findSyncedSkill(bare);
+      const synced = findSyncedSkill(bare, loadedBuckets) ?? findSyncedSkill(bare);
       if (synced) return { name, ...synced, origin: 'synced' };
     }
     const owners = plugins.filter((p) => p.name === prefix);
@@ -179,17 +181,8 @@ function describeSkill(
     }
     return { name, plugin: prefix, origin: 'plugin' };
   }
-  // Same-name precedence follows Claude Code: a personal skill overrides a
-  // project one, so the summary shown is the one the click will run. A
-  // found skill without a description still wins — never fall through to a
-  // lower-priority namesake's summary, or to built-in.
-  const user = lookup(join(homedir(), '.claude', 'skills'), name);
-  if (user) return { name, ...user, origin: 'user' };
-  const project = firstFound(roots, (root) => lookup(join(root, '.claude', 'skills'), name));
-  if (project) return { name, ...project, origin: 'project' };
-  // A skill beats a same-named legacy command file, so commands come last.
-  const command = findCommand(name, roots);
-  if (command) return { name, ...command };
+  const local = findLocal(name, roots, lookup);
+  if (local) return { name, ...local };
   // A synced skill no other command claims is listed under its short name
   // (Claude Code v2.1.281+). While its full name is listed too, some other
   // command — a built-in one, say — owns the short name. Only a bucket this
@@ -202,6 +195,26 @@ function describeSkill(
   // No SKILL.md or command file anywhere the bridge can reach: a skill
   // Claude Code ships inside its own binary.
   return { name, origin: 'builtin' };
+}
+
+/**
+ * The personal skill, project skill or legacy command that owns the short
+ * `name`. Same-name precedence follows Claude Code: a personal skill
+ * overrides a project one, so the summary shown is the one the click will
+ * run. A found skill without a description still wins — never fall through
+ * to a lower-priority namesake's summary, or to built-in.
+ */
+function findLocal(
+  name: string,
+  roots: readonly string[],
+  lookup: SkillLookup,
+): (SkillFound & { origin: 'user' | 'project' }) | undefined {
+  const user = lookup(join(homedir(), '.claude', 'skills'), name);
+  if (user) return { ...user, origin: 'user' };
+  const project = firstFound(roots, (root) => lookup(join(root, '.claude', 'skills'), name));
+  if (project) return { ...project, origin: 'project' };
+  // A skill beats a same-named legacy command file, so commands come last.
+  return findCommand(name, roots);
 }
 
 /**
@@ -257,17 +270,24 @@ function syncBuckets(): string[] {
  * session synced stay on disk when a later one runs on a credential that
  * does not sync — an API key, say — or on another account, and Claude Code
  * then loads none of them. A bucket it does load has every skill it holds
- * in the listing, under the short or the full name; a stale one shows at
- * most the few whose short name a built-in or local command happens to own.
+ * in the listing: under the full name while another command owns the short
+ * one, else under the short name. So a skill listed by its short name alone
+ * while a local skill or command owns that name marks its bucket stale. A
+ * built-in owner leaves no trace on disk, so a stale bucket whose every
+ * skill a built-in shadows still cannot be told apart from the listing.
  */
-function loadedSyncBuckets(listed: ReadonlySet<string>): string[] {
+function loadedSyncBuckets(
+  listed: ReadonlySet<string>,
+  roots: readonly string[],
+  lookup: SkillLookup,
+): string[] {
   const synced = syncedSkillsDir();
+  const shown = (name: string): boolean =>
+    listed.has(`${SYNCED_SKILL_NAMESPACE}:${name}`) ||
+    (listed.has(name) && !findLocal(name, roots, lookup));
   return syncBuckets().filter((bucket) => {
     const held = heldSkills(join(synced, bucket));
-    return (
-      held.length > 0 &&
-      held.every((name) => listed.has(name) || listed.has(`${SYNCED_SKILL_NAMESPACE}:${name}`))
-    );
+    return held.length > 0 && held.every(shown);
   });
 }
 
@@ -294,12 +314,12 @@ function heldSkills(bucketDir: string): string[] {
 
 /**
  * Summary for an account-synced skill invoked as `anthropic-skills:<bare>`,
- * or as plain `<bare>` while no other command uses that name. The full name
- * proves the skill exists, so it searches every bucket; a short name passes
- * only the buckets this session loaded. The skill's own `SKILL.md` wins; a
- * bucket's `manifest.json` — the catalog of what the account holds — covers
- * a skill whose files have not been pulled down. Undefined when no bucket has
- * the skill's folder or lists it, so a plugin named after the namespace can
+ * or as plain `<bare>` while no other command uses that name, searching
+ * `buckets` — every one on disk unless the caller narrows them to those
+ * this session loaded. The skill's own `SKILL.md` wins; a bucket's
+ * `manifest.json` — the catalog of what the account holds — covers a skill
+ * whose files have not been pulled down. Undefined when no bucket has the
+ * skill's folder or lists it, so a plugin named after the namespace can
  * still describe its own skill and a short name can still be a built-in.
  */
 function findSyncedSkill(

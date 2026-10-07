@@ -426,6 +426,42 @@ describe('agent skill registry', () => {
     expect(specs).toEqual([{ name: 'pdf', summary: 'Current copy.', origin: 'synced' }]);
   });
 
+  it("describes a full name from the loaded bucket, not another account's stale one", () => {
+    // Both accounts synced `pdf` and the stale bucket sorts first, but its
+    // `xlsx` is not listed, so the other bucket is the one this session runs.
+    const home = join(root, 'two-accounts-full-home');
+    const stale = syncedBucket(home, 'acct-aaa_user-old');
+    writeSkill(stale, 'pdf', 'description: Old account copy.');
+    writeSkill(stale, 'xlsx', 'description: Spreadsheets.');
+    writeSkill(syncedBucket(home, 'acct-bbb_user-new'), 'pdf', 'description: Current copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:pdf'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:pdf', summary: 'Current copy.', origin: 'synced' },
+    ]);
+  });
+
+  it('does not count a stale bucket as loaded because a local skill shares its names', () => {
+    // A loaded bucket's `deploy` would be listed as `anthropic-skills:deploy`
+    // beside the local one, so `deploy` alone shows the bucket is stale and
+    // `/simplify` is the built-in.
+    const home = join(root, 'stale-shadowed-home');
+    writeSkill(join(home, '.claude', 'skills'), 'deploy', 'description: Local deploy.');
+    const bucket = syncedBucket(home, 'acct-jjj_user-000');
+    writeSkill(bucket, 'deploy', 'description: Stale deploy.');
+    writeSkill(bucket, 'simplify', 'description: Stale synced copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['deploy', 'simplify'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'deploy', summary: 'Local deploy.', origin: 'user' },
+      { name: 'simplify', origin: 'builtin' },
+    ]);
+  });
+
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
     // Claude Code compiles its own skills into the CLI binary, so there is
     // nothing to read. The skill must still be listed — dropping it would
