@@ -12,6 +12,7 @@ import { SessionStore } from '../../../src/session/store.js';
 import {
   cachedSkillCatalog,
   clearSkillCatalogs,
+  FRESH_CATALOG_TTL_MS,
   rememberSkillCatalog,
 } from '../../../src/skills/registry.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
@@ -151,6 +152,30 @@ describe('/skills — agent skill discovery', () => {
     expect(refreshed).toContain('apps/web:deploy');
     expect(refreshed).not.toContain('没列全');
     expect(h.agent.listSkillsCalls).toHaveLength(1);
+  });
+
+  it('re-probes a session-less chat once its cached list goes stale', async () => {
+    const h = await createHarness({ skills: { names: ['old-skill'], plugins: [] } });
+    await expect(h.run('/skills')).resolves.toBe(true);
+    expect(JSON.stringify(h.lastCard())).toContain('/old-skill');
+
+    // The user swaps skills; no run refreshes the fresh-session entry.
+    h.agent.setSkillSource({ names: ['new-skill'], plugins: [] });
+    await expect(h.run('/skills')).resolves.toBe(true);
+    expect(JSON.stringify(h.lastCard())).toContain('/old-skill');
+    expect(h.agent.listSkillsCalls).toHaveLength(1);
+
+    const later = Date.now() + FRESH_CATALOG_TTL_MS;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
+    try {
+      await expect(h.run('/skills')).resolves.toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+    const card = JSON.stringify(h.lastCard());
+    expect(card).toContain('/new-skill');
+    expect(card).not.toContain('/old-skill');
+    expect(h.agent.listSkillsCalls).toHaveLength(2);
   });
 
   it('says the lookup failed rather than showing an empty list', async () => {

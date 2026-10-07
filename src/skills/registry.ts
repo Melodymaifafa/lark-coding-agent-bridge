@@ -361,18 +361,29 @@ export function matchSkills(catalog: SkillCatalog, query: string): SkillSpec[] {
 // Cache
 //
 // Claude Code emits the skill list on EVERY run's `system/init` event, so a
-// normal chat turn refreshes this for free. Entries are per Claude session:
-// skills nested below the startup directory load only once that session
-// touches their directory, so two chats in one monorepo can see different
-// lists. `/skills` only pays for a probe spawn when neither the chat's
-// current session nor the cwd's fresh-session list is cached; a probe is
-// itself a fresh session, so it is only ever cached as one.
+// normal chat turn refreshes its session's entry for free. Entries are per
+// Claude session: skills nested below the startup directory load only once
+// that session touches their directory, so two chats in one monorepo can see
+// different lists. `/skills` only pays for a probe spawn when neither the
+// chat's current session nor the cwd's fresh-session list is cached; a probe
+// is itself a fresh session, so it is only ever cached as one. Runs never
+// refresh that fresh-session entry (their init always names a session), so
+// it expires instead — see `FRESH_CATALOG_TTL_MS`.
 // ---------------------------------------------------------------------------
 
 const catalogs = new Map<string, SkillCatalog>();
 
 /** Oldest entries are dropped past this many, so a long-lived daemon stays bounded. */
 const MAX_CATALOGS = 200;
+
+/**
+ * How long a fresh-session (probe) list is reused before `/skills` probes
+ * again. Without it a chat with no session — e.g. right after `/new` — would
+ * keep the first probe's list for the bridge's whole lifetime: a skill
+ * installed later never shows up, and a deleted one keeps its run button.
+ * Long enough that a few keyword searches in a row share one probe.
+ */
+export const FRESH_CATALOG_TTL_MS = 60_000;
 
 /**
  * Key on the resolved real path: the run flow caches under the realpath
@@ -423,7 +434,13 @@ export function cachedSkillCatalog(
   cwd: string,
   sessionId: string | undefined,
 ): SkillCatalog | undefined {
-  return catalogs.get(cacheKey(agentId, cwd, sessionId));
+  const key = cacheKey(agentId, cwd, sessionId);
+  const catalog = catalogs.get(key);
+  if (catalog && !sessionId && Date.now() - catalog.capturedAt >= FRESH_CATALOG_TTL_MS) {
+    catalogs.delete(key);
+    return undefined;
+  }
+  return catalog;
 }
 
 /** Test seam — the cache is process-global. */

@@ -896,7 +896,8 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
 
   // The list is per Claude session (nested monorepo skills load per
   // session). Prefer what this chat's session last reported, else the cwd's
-  // fresh-session list. A probe IS a fresh session, so it is cached as one —
+  // fresh-session list (re-probed once it expires, since no run refreshes
+  // it). A probe IS a fresh session, so it is cached as one —
   // never under this chat's session, which (e.g. after a bridge restart) may
   // have loaded more; that session's next run records its exact list.
   const sessionId = ctx.sessions.getRaw(ctx.scope)?.sessionId;
