@@ -126,8 +126,9 @@ export function describeSkills(listing: AgentSkillListing, cwd: string): SkillSp
   const roots = projectRoots(cwd);
   const lookup = skillLookup();
   const listed = new Set(listing.names);
+  const loaded = loadedSyncBuckets(listed);
   const specs = listing.names.map((name) =>
-    describeSkill(name, listing.plugins, roots, lookup, listed),
+    describeSkill(name, listing.plugins, roots, lookup, listed, loaded),
   );
   specs.sort((a, b) => a.name.localeCompare(b.name));
   return specs;
@@ -139,6 +140,7 @@ function describeSkill(
   roots: readonly string[],
   lookup: SkillLookup,
   listed: ReadonlySet<string>,
+  loadedBuckets: readonly string[],
 ): SkillSpec {
   const sep = name.indexOf(':');
   if (sep > 0) {
@@ -190,9 +192,11 @@ function describeSkill(
   if (command) return { name, ...command };
   // A synced skill no other command claims is listed under its short name
   // (Claude Code v2.1.281+). While its full name is listed too, some other
-  // command — a built-in one, say — owns the short name.
+  // command — a built-in one, say — owns the short name. Only a bucket this
+  // session loaded counts: a stale one left on disk must not relabel a
+  // built-in that happens to share a name with one of its skills.
   if (!listed.has(`${SYNCED_SKILL_NAMESPACE}:${name}`)) {
-    const synced = findSyncedSkill(name);
+    const synced = findSyncedSkill(name, loadedBuckets);
     if (synced) return { name, ...synced, origin: 'synced' };
   }
   // No SKILL.md or command file anywhere the bridge can reach: a skill
@@ -228,29 +232,84 @@ function readCommandFile(commandsDir: string, name: string): SkillFound | undefi
   return findSkillFile(`${join(commandsDir, ...name.split(':'))}.md`);
 }
 
+/** Where Claude Code keeps the skills it synced from the user's account. */
+function syncedSkillsDir(): string {
+  return join(homedir(), '.claude', 'skills', 'synced');
+}
+
+/**
+ * Every sync bucket on disk, sorted. Each is a directory named after account
+ * ids, so none of them can be hardcoded; a zero-byte `.bucket-<ids>` marker
+ * sits beside them and is skipped.
+ */
+function syncBuckets(): string[] {
+  try {
+    return readdirSync(syncedSkillsDir())
+      .filter((bucket) => !bucket.startsWith('.'))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The sync buckets this listing shows Claude Code loaded. Skills an earlier
+ * session synced stay on disk when a later one runs on a credential that
+ * does not sync — an API key, say — or on another account, and Claude Code
+ * then loads none of them. A bucket it does load has every skill it holds
+ * in the listing, under the short or the full name; a stale one shows at
+ * most the few whose short name a built-in or local command happens to own.
+ */
+function loadedSyncBuckets(listed: ReadonlySet<string>): string[] {
+  const synced = syncedSkillsDir();
+  return syncBuckets().filter((bucket) => {
+    const held = heldSkills(join(synced, bucket));
+    return (
+      held.length > 0 &&
+      held.every((name) => listed.has(name) || listed.has(`${SYNCED_SKILL_NAMESPACE}:${name}`))
+    );
+  });
+}
+
+/**
+ * Names of the skills one sync bucket holds: its `manifest.json` entries,
+ * which include skills not pulled down yet, or — with no manifest — its
+ * skill folders.
+ */
+function heldSkills(bucketDir: string): string[] {
+  const entries = manifestEntries(join(bucketDir, 'manifest.json'));
+  if (entries) {
+    return entries.flatMap((entry) =>
+      typeof entry.name === 'string' && entry.name ? [entry.name] : [],
+    );
+  }
+  let folders: string[];
+  try {
+    folders = readdirSync(bucketDir);
+  } catch {
+    return [];
+  }
+  return folders.filter((folder) => existsSync(join(bucketDir, folder, 'SKILL.md')));
+}
+
 /**
  * Summary for an account-synced skill invoked as `anthropic-skills:<bare>`,
- * or as plain `<bare>` while no other command uses that name. Each sync
- * bucket is a directory named after account ids, so all of them are searched
- * rather than any one name being hardcoded; a zero-byte `.bucket-<ids>`
- * marker sits beside them and is skipped. The skill's own `SKILL.md` wins; a
+ * or as plain `<bare>` while no other command uses that name. The full name
+ * proves the skill exists, so it searches every bucket; a short name passes
+ * only the buckets this session loaded. The skill's own `SKILL.md` wins; a
  * bucket's `manifest.json` — the catalog of what the account holds — covers
  * a skill whose files have not been pulled down. Undefined when no bucket has
  * the skill's folder or lists it, so a plugin named after the namespace can
  * still describe its own skill and a short name can still be a built-in.
  */
-function findSyncedSkill(bare: string): SkillFound | undefined {
-  const synced = join(homedir(), '.claude', 'skills', 'synced');
-  let buckets: string[];
-  try {
-    buckets = readdirSync(synced).sort();
-  } catch {
-    return undefined;
-  }
+function findSyncedSkill(
+  bare: string,
+  buckets: readonly string[] = syncBuckets(),
+): SkillFound | undefined {
+  const synced = syncedSkillsDir();
   let onDisk: SkillFound | undefined;
   let fromManifest: SkillFound | undefined;
   for (const bucket of buckets) {
-    if (bucket.startsWith('.')) continue;
     const file = findSkillFile(join(synced, bucket, bare, 'SKILL.md'));
     if (file?.summary !== undefined) return file;
     onDisk ??= file;
@@ -265,6 +324,18 @@ function findSyncedSkill(bare: string): SkillFound | undefined {
  * search moves on to the next bucket.
  */
 function manifestSummary(path: string, bare: string): SkillFound | undefined {
+  const skill = manifestEntries(path)?.find((entry) => entry.name === bare);
+  if (!skill) return undefined;
+  return typeof skill.description === 'string' && skill.description.trim()
+    ? { summary: condense(skill.description) }
+    : {};
+}
+
+/**
+ * The `skills` entries of one sync bucket's `manifest.json`. Undefined when
+ * the file is missing or unparseable, or has no `skills` array.
+ */
+function manifestEntries(path: string): { name?: unknown; description?: unknown }[] | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -274,15 +345,10 @@ function manifestSummary(path: string, bare: string): SkillFound | undefined {
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const skills = (parsed as { skills?: unknown }).skills;
   if (!Array.isArray(skills)) return undefined;
-  for (const entry of skills) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const skill = entry as { name?: unknown; description?: unknown };
-    if (skill.name !== bare) continue;
-    return typeof skill.description === 'string' && skill.description.trim()
-      ? { summary: condense(skill.description) }
-      : {};
-  }
-  return undefined;
+  return skills.filter(
+    (entry): entry is { name?: unknown; description?: unknown } =>
+      typeof entry === 'object' && entry !== null,
+  );
 }
 
 /**

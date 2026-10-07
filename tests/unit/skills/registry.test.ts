@@ -400,6 +400,32 @@ describe('agent skill registry', () => {
     ]);
   });
 
+  it('keeps a built-in short name built-in beside a stale sync cache', () => {
+    // An API-key session loads no synced skills, though an earlier signed-in
+    // session's downloads stay on disk: `pdf` missing from the listing shows
+    // the bucket is not loaded, so `/simplify` is the built-in alone.
+    const home = join(root, 'stale-cache-home');
+    const bucket = syncedBucket(home, 'acct-iii_user-999');
+    writeSkill(bucket, 'simplify', 'description: Stale synced copy.');
+    writeSkill(bucket, 'pdf', 'description: Work with PDF files.');
+
+    const specs = withHome(home, () => describeSkills({ names: ['simplify'], plugins: [] }, root));
+    expect(specs).toEqual([{ name: 'simplify', origin: 'builtin' }]);
+  });
+
+  it("describes a short name from the loaded bucket, not another account's stale one", () => {
+    // The stale bucket also holds `xlsx`, which this session does not list,
+    // so only the other bucket — every skill of which is listed — counts.
+    const home = join(root, 'two-accounts-home');
+    const stale = syncedBucket(home, 'acct-aaa_user-old');
+    writeSkill(stale, 'pdf', 'description: Old account copy.');
+    writeSkill(stale, 'xlsx', 'description: Spreadsheets.');
+    writeSkill(syncedBucket(home, 'acct-bbb_user-new'), 'pdf', 'description: Current copy.');
+
+    const specs = withHome(home, () => describeSkills({ names: ['pdf'], plugins: [] }, root));
+    expect(specs).toEqual([{ name: 'pdf', summary: 'Current copy.', origin: 'synced' }]);
+  });
+
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
     // Claude Code compiles its own skills into the CLI binary, so there is
     // nothing to read. The skill must still be listed — dropping it would
