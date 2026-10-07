@@ -4,7 +4,17 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunOptions,
+  AgentSkillListing,
 } from '../../src/agent/types.js';
+
+/**
+ * How a fake agent answers `listSkills`. Absent = the adapter has no
+ * `listSkills` method at all, which is how a skill-less agent (Codex)
+ * looks to `/skills`.
+ */
+export type FakeSkillSource =
+  | AgentSkillListing
+  | ((cwd: string) => Promise<AgentSkillListing>);
 
 export interface FakeAgentRun extends AgentRun {
   readonly opts: AgentRunOptions;
@@ -70,18 +80,31 @@ export class FakeAgentAdapter implements AgentAdapter {
   #eventRuns: AgentEvent[][];
   #waitForExitResults: boolean[];
 
+  /** Only defined when the fake was configured with a skill source. */
+  listSkills?: (cwd: string) => Promise<AgentSkillListing>;
+  readonly listSkillsCalls: string[] = [];
+
   constructor(options: {
     id?: string;
     displayName?: string;
     available?: boolean;
     events?: FakeAgentEvents;
     waitForExit?: boolean | readonly boolean[];
+    skills?: FakeSkillSource;
   } = {}) {
     this.id = options.id ?? 'fake-agent';
     this.displayName = options.displayName ?? 'Fake Agent';
     this.#available = options.available ?? true;
     this.#eventRuns = normalizeEventRuns(options.events ?? []);
     this.#waitForExitResults = normalizeWaitForExitResults(options.waitForExit);
+    if (options.skills) this.setSkillSource(options.skills);
+  }
+
+  setSkillSource(source: FakeSkillSource): void {
+    this.listSkills = async (cwd: string) => {
+      this.listSkillsCalls.push(cwd);
+      return typeof source === 'function' ? await source(cwd) : source;
+    };
   }
 
   async isAvailable(): Promise<boolean> {

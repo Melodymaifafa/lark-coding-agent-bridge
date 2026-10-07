@@ -8,6 +8,8 @@ import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import {
   buildAgentPrompt,
+  promptSection,
+  type BridgePromptContext,
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
@@ -49,6 +51,12 @@ import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
+import {
+  isSkillRunMessage,
+  rememberSkillCatalog,
+  skillCardStaleness,
+  STALE_SKILL_CARD_NOTICE,
+} from '../skills/registry';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -246,10 +254,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // unblock arms a fresh quiet-window timer. Net effect: at most one run per
   // chat in flight, and everything sent during a run merges into the next
   // batch (only flushed once 600ms of silence has passed *after* the run).
-  const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+  const pending = new PendingQueue(DEBOUNCE_MS, (scope, queued) => {
+    const batch = takeRunnableBatch(queued);
     const firstMsg = batch[0];
     if (!firstMsg) return;
     pending.block(scope);
+    // Whatever was split off waits, still in order, for the next flush.
+    for (const msg of queued.slice(batch.length)) pending.push(scope, msg);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info('flush', 'start', { scope, batchSize: batch.length });
       try {
@@ -558,6 +569,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  // A handled command drops what was queued before it — not what arrives
+  // while it runs: `/skills` on a cold cache waits on an agent probe (up
+  // to 30s), and messages sent meanwhile must still reach the agent.
+  const queuedBefore = pending.peek(scope);
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -581,7 +596,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     controls,
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
+    const dropped = pending.cancelOnly(scope, queuedBefore);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
     return;
   }
@@ -671,6 +686,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
+  // A skill run's prompt is the bare `/<skill>`, so its bridge_context goes
+  // to the system prompt instead: the skill still needs the chat id to send
+  // cards, and the chat type to keep OAuth out of group chats.
+  const bridgeContext = isSkillRunMessage(firstMsg)
+    ? promptSection('bridge_context', promptContext(firstMsg, batch, channel.botIdentity))
+    : undefined;
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
   // For topic groups: thread the reply so it lands in the same topic as the
@@ -695,10 +716,27 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
+  // A `/skills` run click was checked against its card when clicked, but it
+  // may have queued behind a run since — and `/ws use`, `/new`, `/resume`
+  // move the scope without touching the queue. Re-check here, with nothing
+  // awaited before `startRunFlow` reads the cwd, so the skill never runs in
+  // a cwd or session its card wasn't listed for.
+  if (isSkillRunMessage(firstMsg)) {
+    const stale = skillCardStaleness(firstMsg.listedFor, {
+      cwd: workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default,
+      session: sessions.getRaw(scope)?.sessionId,
+    });
+    if (stale) {
+      log.info('flush', `skill-run-stale-${stale}`, { scope });
+      await channel.send(chatId, { markdown: STALE_SKILL_CARD_NOTICE[stale] }, sendOpts);
+      return;
+    }
+  }
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
     prompt,
+    bridgeContext,
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -750,6 +788,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (evt.type === 'system' && evt.threadId) {
       log.info('session', 'set-thread', { threadId: evt.threadId });
+    }
+    // Claude Code reports its live skill list on every run's init event.
+    // Caching it here (per session — nested monorepo skills differ between
+    // sessions) makes `/skills` instant and exact after the first turn, so
+    // the command only pays for a probe spawn on a cold session.
+    if (evt.type === 'system' && evt.skills) {
+      rememberSkillCatalog(capability.agentId, evt.cwd ?? cwd, evt.sessionId, evt.skills);
     }
   };
 
@@ -1144,6 +1189,19 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The leading run of `queued` that can share one agent turn. A `/skills`
+ * run click must be its own turn — its prompt is the bare `/<skill>` (see
+ * `buildPrompt`), so it can't be merged with other messages — and plain
+ * messages queued ahead of it run first, as usual.
+ */
+function takeRunnableBatch(queued: NormalizedMessage[]): NormalizedMessage[] {
+  const first = queued[0];
+  if (!first || isSkillRunMessage(first)) return queued.slice(0, 1);
+  const nextSkillRun = queued.findIndex(isSkillRunMessage);
+  return nextSkillRun === -1 ? queued : queued.slice(0, nextSkillRun);
+}
+
 function buildPrompt(
   batch: NormalizedMessage[],
   attachments: LocalAttachment[],
@@ -1152,6 +1210,10 @@ function buildPrompt(
 ): string {
   const first = batch[0];
   if (!first) return '';
+  // Claude Code only recognises `/<skill>` at the very start of the prompt;
+  // wrapped in `<user_input>` it is just chat text the model may ignore.
+  // Its bridge_context rides in the system prompt (see `runAgentBatch`).
+  if (isSkillRunMessage(first)) return first.content;
 
   const fileKeys = batch.flatMap((m) => m.resources.map((r) => r.fileKey));
   // When the debounce window merged messages (possibly from several senders —
@@ -1172,28 +1234,36 @@ function buildPrompt(
         ? '请看下面的附件。'
         : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
 
-  const senderType = senderTypeOf(first);
-  const mentions = mergeMentions(batch);
-
   return buildAgentPrompt({
-    context: {
-      chatId: first.chatId,
-      chatType: first.chatType,
-      senderId: first.senderId,
-      ...(first.senderName ? { senderName: first.senderName } : {}),
-      ...(senderType ? { senderType } : {}),
-      ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
-      ...(mentions.length > 0 ? { mentions } : {}),
-      ...(first.threadId ? { threadId: first.threadId } : {}),
-      messageIds: batch.map((m) => m.messageId),
-      source: 'im',
-    },
+    context: promptContext(first, batch, botIdentity),
     instructions: BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
     quotedMessages: quotes.map(toPromptQuote),
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),
   });
+}
+
+/** The batch's `<bridge_context>`: which chat, who sent it, and who you are. */
+function promptContext(
+  first: NormalizedMessage,
+  batch: NormalizedMessage[],
+  botIdentity?: { openId: string; name?: string },
+): BridgePromptContext {
+  const senderType = senderTypeOf(first);
+  const mentions = mergeMentions(batch);
+  return {
+    chatId: first.chatId,
+    chatType: first.chatType,
+    senderId: first.senderId,
+    ...(first.senderName ? { senderName: first.senderName } : {}),
+    ...(senderType ? { senderType } : {}),
+    ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
+    ...(first.threadId ? { threadId: first.threadId } : {}),
+    messageIds: batch.map((m) => m.messageId),
+    source: 'im',
+  };
 }
 
 /**

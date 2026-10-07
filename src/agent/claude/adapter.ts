@@ -12,8 +12,12 @@ import {
   type AgentEvent,
   type AgentRun,
   type AgentRunOptions,
+  type AgentSkillListing,
 } from '../types';
-import { translateEvent } from './stream-json';
+import { readSkillListing, translateEvent } from './stream-json';
+
+/** How long the skill probe waits for claude's `init` line before giving up. */
+const SKILL_PROBE_TIMEOUT_MS = 30_000;
 
 export interface ClaudeAdapterOptions {
   binary?: string;
@@ -52,6 +56,72 @@ export class ClaudeAdapter implements AgentAdapter {
     });
   }
 
+  /**
+   * Ask claude what skills it has in `cwd`, without spending a turn.
+   *
+   * `--output-format stream-json --verbose` makes claude print its `init`
+   * event — which carries the skill list — *before* it calls the model, so
+   * killing the child on that first line costs nothing. The skill set is
+   * cwd-dependent (a repo's own `.claude/skills` counts), which is why cwd
+   * is required and why a plain directory scan would give a different,
+   * wrong answer.
+   *
+   * `--no-session-persistence` keeps the probe out of the user's history,
+   * so `/resume` never lists a one-line "ok" conversation.
+   */
+  async listSkills(cwd: string): Promise<AgentSkillListing> {
+    const args = [
+      '-p',
+      'ok',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--no-session-persistence',
+    ];
+    const child = spawnProcess(this.binary, args, {
+      cwd,
+      env: mergeProcessEnv(process.env, buildLarkChannelEnv(this.larkChannel)),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }) as ClaudeChild;
+
+    return await new Promise<AgentSkillListing>((resolve, reject) => {
+      let settled = false;
+      const finish = (err: Error | null, listing?: AgentSkillListing): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        // The probe only needs the first line; SIGKILL avoids waiting out
+        // claude's normal shutdown tail for a process we never used.
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        if (err) reject(err);
+        else resolve(listing as AgentSkillListing);
+      };
+      const timer = setTimeout(
+        () => finish(new Error(`claude skill probe timed out after ${SKILL_PROBE_TIMEOUT_MS}ms`)),
+        SKILL_PROBE_TIMEOUT_MS,
+      );
+      const rl = createInterface({ input: child.stdout });
+      rl.on('line', (line) => {
+        if (settled || !line.trim()) return;
+        let evt: { type?: string; subtype?: string; skills?: unknown; plugins?: unknown };
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (evt.type !== 'system' || evt.subtype !== 'init') return;
+        const listing = readSkillListing(evt);
+        if (!listing) {
+          finish(new Error('claude init event carried no skill list'));
+          return;
+        }
+        finish(null, listing);
+      });
+      child.on('error', (err) => finish(err));
+      child.on('exit', () => finish(new Error('claude exited before reporting its skill list')));
+    });
+  }
+
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
@@ -66,7 +136,7 @@ export class ClaudeAdapter implements AgentAdapter {
       '--permission-mode',
       opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
       '--append-system-prompt',
-      buildBridgeSystemPrompt(this.botIdentity),
+      buildBridgeSystemPrompt(this.botIdentity, opts.bridgeContext),
     ];
     if (opts.sessionId) args.push('--resume', opts.sessionId);
     if (opts.model) args.push('--model', opts.model);

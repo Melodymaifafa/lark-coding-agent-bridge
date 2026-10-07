@@ -1,4 +1,5 @@
 import { COMMAND_REGISTRY, type CommandSpec } from '../commands/registry';
+import type { SkillSpec } from '../skills/registry';
 
 interface ButtonSpec {
   text: string;
@@ -237,6 +238,125 @@ export function commandMatchCard(partial: string, matches: CommandSpec[]): objec
     if (i < matches.length - 1) elements.push(HR);
   });
   return shell('🔍 命令匹配', elements);
+}
+
+/**
+ * Agent-skill card (`/skills`). Distinct from `commandMatchCard`, which
+ * lists the BRIDGE's own commands: this one lists what Claude Code can do
+ * in the current cwd. Three shapes, because "no skills" and "couldn't ask"
+ * must never look the same:
+ *
+ * - `ok` — the real list, capped so the card stays readable.
+ * - `unsupported` — the running agent has no skill mechanism (Codex).
+ * - `failed` — the lookup itself broke; says so, with the reason.
+ */
+export type SkillsCardInput =
+  | {
+      status: 'ok';
+      /** Everything that matched, before the display cap. */
+      matches: readonly SkillSpec[];
+      /** Size of the whole catalog, so a filtered view can say "of N". */
+      total: number;
+      /** The `/skills <query>` filter, empty when unfiltered. */
+      query: string;
+      cwd: string;
+      /** The chat's Claude session when listed; absent before its first run. */
+      sessionId?: string;
+      /**
+       * The chat has a session but only the cwd's fresh-session list is
+       * known, so skills that session loaded from subdirectories are missing.
+       */
+      partial?: boolean;
+      agentName: string;
+    }
+  | { status: 'unsupported'; agentName: string }
+  | { status: 'failed'; agentName: string; reason: string };
+
+/** Entries rendered per card. Past this, the user filters instead. */
+export const SKILLS_CARD_LIMIT = 10;
+
+const SKILLS_CARD_TITLE = '🧠 Agent 技能';
+
+function skillLine(spec: SkillSpec): string {
+  const origin = spec.origin === 'builtin' ? ' _(内置)_' : '';
+  const summary = spec.summary
+    ? escapeMd(spec.summary)
+    : '_无说明（Claude Code 内置技能，说明不在本机文件里）_';
+  return `\`/${escapeMd(spec.name)}\`${origin} — ${summary}`;
+}
+
+export function skillsCard(input: SkillsCardInput): object {
+  if (input.status === 'unsupported') {
+    return shell(SKILLS_CARD_TITLE, [
+      divMd(
+        `当前 agent 是 **${escapeMd(input.agentName)}**，它没有 skills 机制，所以没有可列的技能。`,
+      ),
+    ]);
+  }
+  if (input.status === 'failed') {
+    return shell(SKILLS_CARD_TITLE, [
+      divMd(`⚠️ **取不到技能列表**（不是「没有技能」）。`),
+      divMd(`原因：${escapeMd(input.reason)}`),
+      HR,
+      divMd('先随便发一句话让 agent 跑一轮，再试 `/skills`；或用 `/status` 确认 agent 和工作目录。'),
+    ]);
+  }
+
+  const { matches, total, query, cwd, sessionId, agentName } = input;
+  const shown = matches.slice(0, SKILLS_CARD_LIMIT);
+  const elements: object[] = [];
+
+  const head = query
+    ? `\`${escapeMd(query)}\` 匹配到 **${matches.length}** 个技能（共 ${total} 个）`
+    : `**${agentName}** 当前有 **${total}** 个技能`;
+  elements.push(divMd(`${head}\n📁 \`${escapeCode(cwd)}\``));
+  if (input.partial) {
+    elements.push(
+      divMd('_当前会话在子目录里加载的技能可能没列全 — 先发一条消息，再 `/skills` 就是完整清单。_'),
+    );
+  }
+  elements.push(HR);
+
+  if (shown.length === 0) {
+    elements.push(divMd(`没有名字或说明包含 \`${escapeMd(query)}\` 的技能。`));
+    return shell(SKILLS_CARD_TITLE, elements);
+  }
+
+  shown.forEach((spec, i) => {
+    elements.push(divMd(skillLine(spec)));
+    elements.push(
+      actions([
+        {
+          text: `▸ 运行 /${spec.name}`,
+          // The skill set is per cwd and per session: carry the ones this
+          // list was built for so a click after `/cd`, `/new` or `/resume`
+          // can't run a different same-named skill.
+          value: {
+            cmd: 'skills.run',
+            arg: spec.name,
+            cwd,
+            ...(sessionId ? { session: sessionId } : {}),
+          },
+          style: i === 0 ? 'primary' : 'default',
+        },
+      ]),
+    );
+    if (i < shown.length - 1) elements.push(HR);
+  });
+
+  if (matches.length > shown.length) {
+    elements.push(HR);
+    elements.push(
+      divMd(
+        `还有 **${matches.length - shown.length}** 个没显示 — 用 \`/skills <关键词>\` 缩小范围。`,
+      ),
+    );
+  } else if (!query && total > shown.length) {
+    elements.push(HR);
+    elements.push(divMd('用 `/skills <关键词>` 按名字或说明搜索。'));
+  }
+
+  return shell(SKILLS_CARD_TITLE, elements);
 }
 
 function escapeMd(s: string): string {

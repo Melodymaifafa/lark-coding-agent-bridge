@@ -23,8 +23,21 @@ import {
 import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
-import { commandMatchCard, helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import {
+  commandMatchCard,
+  helpCard,
+  resumeCard,
+  skillsCard,
+  statusCard,
+  workspacesCard,
+} from '../card/templates';
 import { COMMAND_REGISTRY, matchCommands } from './registry';
+import {
+  cachedSkillCatalog,
+  matchSkills,
+  rememberSkillCatalog,
+  type SkillCatalog,
+} from '../skills/registry';
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -165,6 +178,7 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  '/skills': handleSkills,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -847,6 +861,94 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     chatMode: ctx.chatMode,
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+}
+
+/**
+ * `/skills [keyword]` — list the AGENT's skills (Claude Code `/skill-name`
+ * entries), not the bridge's own commands. Names come from the agent
+ * itself; a keyword matches names and descriptions, name hits listed first.
+ *
+ * Three outcomes are kept apart on purpose: the agent has no skill
+ * mechanism, the lookup failed, and the real list. An empty card must never
+ * be ambiguous between "none" and "couldn't ask".
+ */
+async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
+  const agentName = ctx.agent.displayName;
+  const send = async (card: object): Promise<void> => {
+    await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+  };
+
+  if (!ctx.agent.listSkills) {
+    await send(skillsCard({ status: 'unsupported', agentName }));
+    return;
+  }
+  const cwd = effectiveWorkspaceCwd(ctx);
+  if (!cwd) {
+    await send(
+      skillsCard({
+        status: 'failed',
+        agentName,
+        reason: '这个 chat 还没有工作目录，技能清单跟目录有关，先用 `/cd` 或 `/ws use` 设一个。',
+      }),
+    );
+    return;
+  }
+
+  // The list is per Claude session (nested monorepo skills load per
+  // session). Prefer what this chat's session last reported, else the cwd's
+  // fresh-session list (re-probed once it expires, since no run refreshes
+  // it). A probe IS a fresh session, so it is cached as one —
+  // never under this chat's session, which (e.g. after a bridge restart) may
+  // have loaded more; that session's next run records its exact list.
+  const sessionId = ctx.sessions.getRaw(ctx.scope)?.sessionId;
+  let catalog: SkillCatalog | undefined =
+    (sessionId ? cachedSkillCatalog(ctx.agent.id, cwd, sessionId) : undefined) ??
+    cachedSkillCatalog(ctx.agent.id, cwd, undefined);
+  if (!catalog) {
+    try {
+      catalog = rememberSkillCatalog(
+        ctx.agent.id,
+        cwd,
+        undefined,
+        await ctx.agent.listSkills(cwd),
+      );
+    } catch (err) {
+      log.fail('command', err, { cmd: '/skills' });
+      reportMetric('command_fail', 1, { step: 'skills-probe' });
+      await send(
+        skillsCard({
+          status: 'failed',
+          agentName,
+          reason: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return;
+    }
+  }
+  if (catalog.skills.length === 0) {
+    await send(
+      skillsCard({
+        status: 'failed',
+        agentName,
+        reason: `${agentName} 返回了一个空清单 — 这通常表示它的技能没加载成功，而不是真的没有技能。`,
+      }),
+    );
+    return;
+  }
+
+  const query = args.trim();
+  await send(
+    skillsCard({
+      status: 'ok',
+      matches: matchSkills(catalog, query),
+      total: catalog.skills.length,
+      query,
+      cwd,
+      ...(sessionId ? { sessionId } : {}),
+      partial: Boolean(sessionId) && catalog.sessionId !== sessionId,
+      agentName,
+    }),
+  );
 }
 
 function formatOwnerState(ctx: CommandContext): string {

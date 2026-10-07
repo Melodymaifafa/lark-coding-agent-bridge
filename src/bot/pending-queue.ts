@@ -54,6 +54,29 @@ export class PendingQueue {
     return entry.messages;
   }
 
+  /** A copy of what is queued for `scope` right now, oldest first. */
+  peek(scope: string): NormalizedMessage[] {
+    return [...(this.map.get(scope)?.messages ?? [])];
+  }
+
+  /**
+   * Drop just `msgs` from `scope`'s queue; anything pushed since stays
+   * queued on its own timer. Returns what was actually dropped.
+   */
+  cancelOnly(scope: string, msgs: readonly NormalizedMessage[]): NormalizedMessage[] {
+    const entry = this.map.get(scope);
+    if (!entry || msgs.length === 0) return [];
+    const doomed = new Set(msgs);
+    const dropped = entry.messages.filter((m) => doomed.has(m));
+    if (dropped.length === 0) return [];
+    entry.messages = entry.messages.filter((m) => !doomed.has(m));
+    if (entry.messages.length === 0) {
+      if (entry.timer) clearTimeout(entry.timer);
+      this.map.delete(scope);
+    }
+    return dropped;
+  }
+
   cancelAll(): void {
     for (const entry of this.map.values()) {
       if (entry.timer) clearTimeout(entry.timer);

@@ -25,6 +25,7 @@ export const COMMAND_REGISTRY: readonly CommandSpec[] = [
   { name: 'new', aliases: ['reset'], summary: '清空当前 chat 的会话（`/new chat [name]` 新建群+新会话）' },
   { name: 'resume', summary: '列出并恢复历史会话（`/resume [N]` 最多 N 条）' },
   { name: 'status', summary: '查看当前状态（profile / cwd / session / 队列）' },
+  { name: 'skills', summary: '列出当前 agent 可用的技能（`/skills [关键词]` 搜索）' },
   { name: 'help', summary: '显示命令列表（本帮助）' },
   { name: 'stop', summary: '结束当前正在跑的任务' },
   { name: 'timeout', summary: '当前 session 的探活分钟数（`/timeout [N|off|default]`）' },

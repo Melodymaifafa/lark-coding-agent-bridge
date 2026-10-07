@@ -70,6 +70,19 @@ describe('ClaudeAdapter system prompt wiring', () => {
     const flagIndex = args.indexOf('--append-system-prompt');
     expect(args[flagIndex + 1]).toBe(buildBridgeSystemPrompt(undefined));
   });
+
+  it('puts a run bridge_context in the system prompt and keeps the prompt bare', () => {
+    spawnMock.spawnProcess.mockReturnValue(fakeChild());
+    const adapter = new ClaudeAdapter();
+    const block = '<bridge_context>\n{"chatId":"oc_x","chatType":"p2p"}\n</bridge_context>';
+
+    adapter.run({ runId: 'r1', prompt: '/handoff', cwd: '/tmp', bridgeContext: block });
+
+    const args = spawnMock.spawnProcess.mock.calls[0]?.[1] as string[];
+    expect(args[args.indexOf('-p') + 1]).toBe('/handoff');
+    const flagIndex = args.indexOf('--append-system-prompt');
+    expect(args[flagIndex + 1]).toBe(buildBridgeSystemPrompt(undefined, block));
+  });
 });
 
 describe('CodexAdapter system prompt wiring', () => {

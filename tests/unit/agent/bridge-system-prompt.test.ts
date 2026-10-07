@@ -55,6 +55,14 @@ describe('buildBridgeSystemPrompt', () => {
     const prompt = buildBridgeSystemPrompt({ openId: 'ou_bot_self' });
     expect(prompt).toContain('ou_bot_self');
   });
+
+  it('appends a run bridge_context block after the identity line', () => {
+    const block = '<bridge_context>\n{"chatId":"oc_x","chatType":"group"}\n</bridge_context>';
+    const prompt = buildBridgeSystemPrompt({ openId: 'ou_bot_self' }, block);
+    expect(prompt.startsWith(BRIDGE_SYSTEM_PROMPT)).toBe(true);
+    expect(prompt).toContain(block);
+    expect(prompt.indexOf('ou_bot_self')).toBeLessThan(prompt.indexOf(block));
+  });
 });
 
 describe('prefixBridgeSystemPrompt', () => {

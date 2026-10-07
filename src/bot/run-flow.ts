@@ -24,6 +24,8 @@ export interface StartRunFlowInput {
   scopeId: string;
   scope: ScopeContext;
   prompt: string;
+  /** See `AgentRunOptions.bridgeContext`. */
+  bridgeContext?: string;
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;
@@ -150,6 +152,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
               .map((attachment) => attachment.path)
               .filter((path): path is string => Boolean(path))
           : undefined,
+      bridgeContext: input.bridgeContext,
       stopGraceMs: input.stopGraceMs,
       observability: input.observability,
     });

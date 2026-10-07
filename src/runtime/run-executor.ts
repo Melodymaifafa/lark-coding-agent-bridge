@@ -22,6 +22,8 @@ export interface SubmitRunInput {
   threadId?: string;
   model?: string;
   images?: readonly string[];
+  /** See `AgentRunOptions.bridgeContext`. */
+  bridgeContext?: string;
   stopGraceMs?: number;
   nowait?: boolean;
   observability?: {
@@ -103,6 +105,7 @@ export class RunExecutor {
       images: input.images,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,
+      bridgeContext: input.bridgeContext,
       stopGraceMs: input.stopGraceMs,
     };
     let run: AgentRun;
