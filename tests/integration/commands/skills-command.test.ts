@@ -9,7 +9,11 @@ import { SKILLS_CARD_LIMIT } from '../../../src/card/templates.js';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
 import { createRootConfig, saveRootConfig } from '../../../src/config/profile-store.js';
 import { SessionStore } from '../../../src/session/store.js';
-import { clearSkillCatalogs, rememberSkillCatalog } from '../../../src/skills/registry.js';
+import {
+  cachedSkillCatalog,
+  clearSkillCatalogs,
+  rememberSkillCatalog,
+} from '../../../src/skills/registry.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter, type FakeSkillSource } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
@@ -110,6 +114,42 @@ describe('/skills — agent skill discovery', () => {
     const card = JSON.stringify(h.lastCard());
     expect(card).toContain('/probed');
     expect(card).not.toContain('apps/web:deploy');
+    expect(h.agent.listSkillsCalls).toHaveLength(1);
+  });
+
+  it("binds each run button to the chat's session", async () => {
+    const h = await createHarness({ skills: { names: ['probed'], plugins: [] } });
+    h.sessions.set('chat-1', 'sess-1', h.cwd);
+    rememberSkillCatalog(h.agent.id, h.cwd, 'sess-1', { names: ['from-run'], plugins: [] });
+
+    await expect(h.run('/skills')).resolves.toBe(true);
+    const card = JSON.stringify(h.lastCard());
+    expect(card).toContain('"session":"sess-1"');
+    expect(card).not.toContain('没列全');
+  });
+
+  it("does not pin a fresh probe to the chat's existing session", async () => {
+    const h = await createHarness({ skills: { names: ['probed'], plugins: [] } });
+    // After a bridge restart: the chat still has a session, nothing is cached.
+    h.sessions.set('chat-1', 'sess-1', h.cwd);
+
+    await expect(h.run('/skills')).resolves.toBe(true);
+    const card = JSON.stringify(h.lastCard());
+    expect(card).toContain('/probed');
+    // The probe can't see what that session loaded from subdirectories.
+    expect(card).toContain('没列全');
+    expect(cachedSkillCatalog(h.agent.id, h.cwd, 'sess-1')).toBeUndefined();
+    expect(cachedSkillCatalog(h.agent.id, h.cwd, undefined)?.skills[0]?.name).toBe('probed');
+
+    // The session's next run reports its exact list, which then wins.
+    rememberSkillCatalog(h.agent.id, h.cwd, 'sess-1', {
+      names: ['apps/web:deploy', 'probed'],
+      plugins: [],
+    });
+    await expect(h.run('/skills')).resolves.toBe(true);
+    const refreshed = JSON.stringify(h.lastCard());
+    expect(refreshed).toContain('apps/web:deploy');
+    expect(refreshed).not.toContain('没列全');
     expect(h.agent.listSkillsCalls).toHaveLength(1);
   });
 

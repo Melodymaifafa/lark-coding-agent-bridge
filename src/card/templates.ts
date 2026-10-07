@@ -260,6 +260,13 @@ export type SkillsCardInput =
       /** The `/skills <query>` filter, empty when unfiltered. */
       query: string;
       cwd: string;
+      /** The chat's Claude session when listed; absent before its first run. */
+      sessionId?: string;
+      /**
+       * The chat has a session but only the cwd's fresh-session list is
+       * known, so skills that session loaded from subdirectories are missing.
+       */
+      partial?: boolean;
       agentName: string;
     }
   | { status: 'unsupported'; agentName: string }
@@ -295,7 +302,7 @@ export function skillsCard(input: SkillsCardInput): object {
     ]);
   }
 
-  const { matches, total, query, cwd, agentName } = input;
+  const { matches, total, query, cwd, sessionId, agentName } = input;
   const shown = matches.slice(0, SKILLS_CARD_LIMIT);
   const elements: object[] = [];
 
@@ -303,6 +310,11 @@ export function skillsCard(input: SkillsCardInput): object {
     ? `\`${escapeMd(query)}\` 匹配到 **${matches.length}** 个技能（共 ${total} 个）`
     : `**${agentName}** 当前有 **${total}** 个技能`;
   elements.push(divMd(`${head}\n📁 \`${escapeCode(cwd)}\``));
+  if (input.partial) {
+    elements.push(
+      divMd('_当前会话在子目录里加载的技能可能没列全 — 先发一条消息，再 `/skills` 就是完整清单。_'),
+    );
+  }
   elements.push(HR);
 
   if (shown.length === 0) {
@@ -316,9 +328,15 @@ export function skillsCard(input: SkillsCardInput): object {
       actions([
         {
           text: `▸ 运行 /${spec.name}`,
-          // The skill set is per-cwd: carry the one this list was built for
-          // so a click after `/cd` can't run a different same-named skill.
-          value: { cmd: 'skills.run', arg: spec.name, cwd },
+          // The skill set is per cwd and per session: carry the ones this
+          // list was built for so a click after `/cd`, `/new` or `/resume`
+          // can't run a different same-named skill.
+          value: {
+            cmd: 'skills.run',
+            arg: spec.name,
+            cwd,
+            ...(sessionId ? { session: sessionId } : {}),
+          },
           style: i === 0 ? 'primary' : 'default',
         },
       ]),

@@ -280,8 +280,9 @@ export function matchSkills(catalog: SkillCatalog, query: string): SkillSpec[] {
 // normal chat turn refreshes this for free. Entries are per Claude session:
 // skills nested below the startup directory load only once that session
 // touches their directory, so two chats in one monorepo can see different
-// lists. `/skills` only pays for a probe spawn when the chat's current
-// session (or, before its first run, the cwd's fresh-session list) is cold.
+// lists. `/skills` only pays for a probe spawn when neither the chat's
+// current session nor the cwd's fresh-session list is cached; a probe is
+// itself a fresh session, so it is only ever cached as one.
 // ---------------------------------------------------------------------------
 
 const catalogs = new Map<string, SkillCatalog>();

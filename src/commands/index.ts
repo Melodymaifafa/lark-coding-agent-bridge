@@ -895,16 +895,20 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
   }
 
   // The list is per Claude session (nested monorepo skills load per
-  // session). A probe can only see a fresh session's set; caching it under
-  // this chat's session is still right until its next run replaces it.
+  // session). Prefer what this chat's session last reported, else the cwd's
+  // fresh-session list. A probe IS a fresh session, so it is cached as one —
+  // never under this chat's session, which (e.g. after a bridge restart) may
+  // have loaded more; that session's next run records its exact list.
   const sessionId = ctx.sessions.getRaw(ctx.scope)?.sessionId;
-  let catalog: SkillCatalog | undefined = cachedSkillCatalog(ctx.agent.id, cwd, sessionId);
+  let catalog: SkillCatalog | undefined =
+    (sessionId ? cachedSkillCatalog(ctx.agent.id, cwd, sessionId) : undefined) ??
+    cachedSkillCatalog(ctx.agent.id, cwd, undefined);
   if (!catalog) {
     try {
       catalog = rememberSkillCatalog(
         ctx.agent.id,
         cwd,
-        sessionId,
+        undefined,
         await ctx.agent.listSkills(cwd),
       );
     } catch (err) {
@@ -939,6 +943,8 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
       total: catalog.skills.length,
       query,
       cwd,
+      ...(sessionId ? { sessionId } : {}),
+      partial: Boolean(sessionId) && catalog.sessionId !== sessionId,
       agentName,
     }),
   );

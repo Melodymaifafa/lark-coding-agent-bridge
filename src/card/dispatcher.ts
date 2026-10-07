@@ -121,6 +121,19 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       );
       return;
     }
+    // Likewise per session (nested monorepo skills load per session): a card
+    // listed in one session is stale after `/new` or `/resume`. A card listed
+    // before the scope's first run carries no session — that fresh set is
+    // what every session in this cwd starts with, so it stays valid.
+    const cardSession = typeof payload.session === 'string' ? payload.session : '';
+    if (cardSession && cardSession !== deps.sessions.getRaw(scope)?.sessionId) {
+      log.info('cardAction', 'skill-run-stale-session', { skill, scope });
+      await replyToClick(
+        deps,
+        '⚠️ 这张技能卡是在之前的会话里列出的，现在已经换了会话，没有运行。请重新发送 `/skills` 再点。',
+      );
+      return;
+    }
     log.info('cardAction', 'skill-run', { skill, scope });
     deps.pending.push(scope, {
       ...makeFakeMsg(deps.evt, threadId),

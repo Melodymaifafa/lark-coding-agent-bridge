@@ -78,6 +78,55 @@ describe('/skills card run button', () => {
     expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('/skills');
   });
 
+  it('refuses a card listed in a different session and tells the user to re-list', async () => {
+    const h = await createHarness();
+    // Listed in `sess-old`; `/resume` has since switched the scope, same cwd.
+    h.sessions.set('oc_group', 'sess-new', h.cwd);
+
+    await h.dispatch({
+      cmd: 'skills.run',
+      arg: 'apps/web:deploy',
+      cwd: h.cwd,
+      session: 'sess-old',
+    });
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+    expect(JSON.stringify(h.channel.sent.at(-1)?.content)).toContain('/skills');
+  });
+
+  it('refuses a session-bound card after `/new` cleared the session', async () => {
+    const h = await createHarness();
+
+    await h.dispatch({
+      cmd: 'skills.run',
+      arg: 'apps/web:deploy',
+      cwd: h.cwd,
+      session: 'sess-old',
+    });
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+    expect(h.channel.sent).toHaveLength(1);
+  });
+
+  it('runs a card listed in the current session', async () => {
+    const h = await createHarness();
+    h.sessions.set('oc_group', 'sess-1', h.cwd);
+
+    await h.dispatch({ cmd: 'skills.run', arg: 'handoff', cwd: h.cwd, session: 'sess-1' });
+
+    expect(h.pending.cancel('oc_group')[0]?.content).toBe('/handoff');
+  });
+
+  it('still runs a card listed before the first run once a session exists', async () => {
+    const h = await createHarness();
+    // A fresh session's skills are what every session in the cwd starts with.
+    h.sessions.set('oc_group', 'sess-1', h.cwd);
+
+    await h.dispatch({ cmd: 'skills.run', arg: 'handoff', cwd: h.cwd });
+
+    expect(h.pending.cancel('oc_group')[0]?.content).toBe('/handoff');
+  });
+
   it('refuses a card that does not say which cwd it was listed for', async () => {
     const h = await createHarness();
 
@@ -101,6 +150,7 @@ interface Harness {
   tmp: TmpProfile;
   channel: FakeChannel;
   pending: PendingQueue;
+  sessions: SessionStore;
   workspaces: WorkspaceStore;
   /** The scope's cwd — what a fresh `/skills` card would carry. */
   cwd: string;
@@ -147,6 +197,7 @@ async function createHarness(
     tmp,
     channel,
     pending,
+    sessions,
     workspaces,
     cwd: tmp.workspace,
     dispatch: (value: Record<string, unknown>) =>
