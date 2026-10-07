@@ -46,11 +46,20 @@ describe('/skills card run button', () => {
     expect(h.pending.cancel('oc_group')[0]?.content).toBe('/vercel:deploy');
   });
 
+  it('accepts a directory-qualified nested skill name', async () => {
+    const h = await createHarness();
+
+    await h.dispatch({ cmd: 'skills.run', arg: 'apps/web:deploy', cwd: h.cwd });
+
+    expect(h.pending.cancel('oc_group')[0]?.content).toBe('/apps/web:deploy');
+  });
+
   it('drops a payload that is not a plain skill name', async () => {
     const h = await createHarness();
 
     await h.dispatch({ cmd: 'skills.run', arg: 'handoff && rm -rf /', cwd: h.cwd });
     await h.dispatch({ cmd: 'skills.run', arg: 'two\nlines', cwd: h.cwd });
+    await h.dispatch({ cmd: 'skills.run', arg: 'apps/web deploy:x', cwd: h.cwd });
     await h.dispatch({ cmd: 'skills.run', arg: '', cwd: h.cwd });
     await h.dispatch({ cmd: 'skills.run', cwd: h.cwd });
 

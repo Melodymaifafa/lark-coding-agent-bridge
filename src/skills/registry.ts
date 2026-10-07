@@ -16,14 +16,17 @@
  */
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { AgentPluginRef, AgentSkillListing } from '../agent/types';
 
 /** Where a skill's definition lives. Drives the label shown on the card. */
 export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin';
 
 export interface SkillSpec {
-  /** Exactly what the user types after the slash: `handoff`, `vercel:deploy`. */
+  /**
+   * Exactly what the user types after the slash: `handoff`, `vercel:deploy`,
+   * or a nested monorepo skill like `apps/web:deploy`.
+   */
   name: string;
   /** One-line description from `SKILL.md` frontmatter. Absent for built-ins. */
   summary?: string;
@@ -64,30 +67,76 @@ const SUMMARY_MAX_CHARS = 110;
  * without a summary rather than dropping it from the catalog.
  */
 export function describeSkills(listing: AgentSkillListing, cwd: string): SkillSpec[] {
-  const specs = listing.names.map((name) => describeSkill(name, listing.plugins, cwd));
+  const roots = projectRoots(cwd);
+  const specs = listing.names.map((name) => describeSkill(name, listing.plugins, roots));
   specs.sort((a, b) => a.name.localeCompare(b.name));
   return specs;
 }
 
-function describeSkill(name: string, plugins: readonly AgentPluginRef[], cwd: string): SkillSpec {
+function describeSkill(
+  name: string,
+  plugins: readonly AgentPluginRef[],
+  roots: readonly string[],
+): SkillSpec {
   const sep = name.indexOf(':');
   if (sep > 0) {
-    const plugin = name.slice(0, sep);
+    const prefix = name.slice(0, sep);
     const bare = name.slice(sep + 1);
-    for (const p of plugins) {
-      if (p.name !== plugin) continue;
+    const owners = plugins.filter((p) => p.name === prefix);
+    for (const p of owners) {
       const summary = readSkillSummary(join(p.path, 'skills', bare, 'SKILL.md'));
-      if (summary !== undefined) return { name, summary, plugin, origin: 'plugin' };
+      if (summary !== undefined) return { name, summary, plugin: prefix, origin: 'plugin' };
     }
-    return { name, plugin, origin: 'plugin' };
+    if (owners.length === 0) {
+      // Not a plugin: a directory-qualified nested project skill such as
+      // `apps/web:deploy`, living in `apps/web/.claude/skills/deploy`.
+      const summary = firstSummary(
+        roots.map((root) => join(root, prefix, '.claude', 'skills', bare, 'SKILL.md')),
+      );
+      if (summary !== undefined) return { name, summary, origin: 'project' };
+      // Plugin names never contain a slash.
+      if (prefix.includes('/')) return { name, origin: 'project' };
+    }
+    return { name, plugin: prefix, origin: 'plugin' };
   }
-  const projectSummary = readSkillSummary(join(cwd, '.claude', 'skills', name, 'SKILL.md'));
-  if (projectSummary !== undefined) return { name, summary: projectSummary, origin: 'project' };
+  // Same-name precedence follows Claude Code: a personal skill overrides a
+  // project one, so the summary shown is the one the click will run.
   const userSummary = readSkillSummary(join(homedir(), '.claude', 'skills', name, 'SKILL.md'));
   if (userSummary !== undefined) return { name, summary: userSummary, origin: 'user' };
+  const projectSummary = firstSummary(
+    roots.map((root) => join(root, '.claude', 'skills', name, 'SKILL.md')),
+  );
+  if (projectSummary !== undefined) return { name, summary: projectSummary, origin: 'project' };
   // No SKILL.md anywhere the bridge can reach: a skill Claude Code ships
   // inside its own binary.
   return { name, origin: 'builtin' };
+}
+
+/**
+ * Directories whose `.claude/skills` hold project skills for `cwd`: Claude
+ * Code loads them from cwd and every parent up to the repository root, so a
+ * cwd of `packages/frontend` still sees the repo root's skills. Nearest
+ * first. Outside a git repo only cwd itself counts.
+ */
+function projectRoots(cwd: string): string[] {
+  const start = resolve(cwd);
+  const roots: string[] = [];
+  let dir = start;
+  for (;;) {
+    roots.push(dir);
+    if (existsSync(join(dir, '.git'))) return roots;
+    const parent = dirname(dir);
+    if (parent === dir) return [start];
+    dir = parent;
+  }
+}
+
+function firstSummary(paths: readonly string[]): string | undefined {
+  for (const path of paths) {
+    const summary = readSkillSummary(path);
+    if (summary !== undefined) return summary;
+  }
+  return undefined;
 }
 
 /**

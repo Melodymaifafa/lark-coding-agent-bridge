@@ -27,10 +27,12 @@ const LEGACY_CLAUDE_CALLBACK_MARKER = '__claude_cb';
 /** Button payload `cmd` used by the `/skills` card to run an agent skill. */
 const SKILL_RUN_CMD = 'skills.run';
 /**
- * A skill name is `word` or `plugin:word`. Anchored so a crafted payload
- * can't smuggle spaces or newlines into the prompt we hand the agent.
+ * A skill name is `word`, `plugin:word`, or a directory-qualified nested
+ * skill like `apps/web:deploy` (monorepo subdirectory skills). Anchored so a
+ * crafted payload can't smuggle spaces or newlines into the prompt we hand
+ * the agent.
  */
-const SKILL_NAME_RE = /^[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?$/;
+const SKILL_NAME_RE = /^(?:(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+:)?[A-Za-z0-9_-]+$/;
 
 export interface CardDispatchDeps {
   channel: LarkChannel;

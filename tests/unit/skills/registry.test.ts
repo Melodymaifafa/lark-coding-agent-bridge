@@ -53,6 +53,55 @@ describe('agent skill registry', () => {
     });
   });
 
+  it('describes a personal skill over a same-named project skill', () => {
+    // Claude Code resolves a shared name personal-first, so that is the
+    // skill the run button invokes — the card must describe that one.
+    const home = join(root, 'home');
+    writeSkill(join(home, '.claude', 'skills'), 'deploy', 'description: Personal deploy.');
+    const cwd = join(root, 'proj');
+    writeSkill(join(cwd, '.claude', 'skills'), 'deploy', 'description: Project deploy.');
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const [spec] = describeSkills({ names: ['deploy'], plugins: [] }, cwd);
+      expect(spec).toEqual({ name: 'deploy', summary: 'Personal deploy.', origin: 'user' });
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('finds a project skill in a parent directory up to the repo root', () => {
+    const repo = join(root, 'repo');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    writeSkill(join(repo, '.claude', 'skills'), 'release', 'description: Cut a release.');
+    const cwd = join(repo, 'packages', 'frontend');
+    mkdirSync(cwd, { recursive: true });
+
+    const [spec] = describeSkills({ names: ['release'], plugins: [] }, cwd);
+    expect(spec).toEqual({ name: 'release', summary: 'Cut a release.', origin: 'project' });
+  });
+
+  it('resolves a directory-qualified nested skill as a project skill', () => {
+    const repo = join(root, 'mono');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    writeSkill(
+      join(repo, 'apps', 'web', '.claude', 'skills'),
+      'deploy',
+      'description: Deploy the web app.',
+    );
+
+    const [spec] = describeSkills({ names: ['apps/web:deploy'], plugins: [] }, repo);
+    expect(spec).toEqual({
+      name: 'apps/web:deploy',
+      summary: 'Deploy the web app.',
+      origin: 'project',
+    });
+  });
+
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
     // Claude Code compiles its own skills into the CLI binary, so there is
     // nothing to read. The skill must still be listed — dropping it would
