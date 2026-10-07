@@ -13,7 +13,13 @@ import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
-import { SKILL_RUN_CONTENT_TYPE } from '../skills/registry';
+import {
+  SKILL_RUN_CONTENT_TYPE,
+  STALE_SKILL_CARD_NOTICE,
+  skillCardStaleness,
+  type SkillCardScope,
+  type SkillRunMessage,
+} from '../skills/registry';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -109,39 +115,32 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
     }
-    // The card listed the skills of one cwd. If the scope has moved since
-    // (`/cd`, `/ws use`), the same name could run a different skill or none
-    // at all — have the user re-list rather than guess.
-    const cardCwd = typeof payload.cwd === 'string' ? payload.cwd : '';
-    const cwd = deps.workspaces.cwdFor(scope) ?? deps.controls.profileConfig.workspaces.default;
-    if (!cardCwd || cardCwd !== cwd) {
-      log.info('cardAction', 'skill-run-stale-cwd', { skill, scope });
-      await replyToClick(
-        deps,
-        '⚠️ 这张技能卡是在另一个工作目录下列出的，当前目录已经变了，没有运行。请重新发送 `/skills` 再点。',
-      );
-      return;
-    }
-    // Likewise per session (nested monorepo skills load per session): a card
-    // listed in one session is stale after `/new` or `/resume`. A card listed
-    // before the scope's first run carries no session — that fresh set is
-    // what every session in this cwd starts with, so it stays valid.
-    const cardSession = typeof payload.session === 'string' ? payload.session : '';
-    if (cardSession && cardSession !== deps.sessions.getRaw(scope)?.sessionId) {
-      log.info('cardAction', 'skill-run-stale-session', { skill, scope });
-      await replyToClick(
-        deps,
-        '⚠️ 这张技能卡是在之前的会话里列出的，现在已经换了会话，没有运行。请重新发送 `/skills` 再点。',
-      );
+    // The card listed the skills of one cwd and session. If the scope has
+    // moved since (`/cd`, `/ws use`, `/new`, `/resume`), the same name could
+    // run a different skill or none at all — have the user re-list rather
+    // than guess. The batch runner re-checks before the run starts.
+    const listedFor: SkillCardScope = {
+      cwd: typeof payload.cwd === 'string' ? payload.cwd : undefined,
+      session: typeof payload.session === 'string' ? payload.session : undefined,
+    };
+    const stale = skillCardStaleness(listedFor, {
+      cwd: deps.workspaces.cwdFor(scope) ?? deps.controls.profileConfig.workspaces.default,
+      session: deps.sessions.getRaw(scope)?.sessionId,
+    });
+    if (stale) {
+      log.info('cardAction', `skill-run-stale-${stale}`, { skill, scope });
+      await replyToClick(deps, STALE_SKILL_CARD_NOTICE[stale]);
       return;
     }
     log.info('cardAction', 'skill-run', { skill, scope });
-    deps.pending.push(scope, {
+    const run: SkillRunMessage = {
       ...makeFakeMsg(deps.evt, threadId),
       chatType: mode === 'p2p' ? 'p2p' : 'group',
       content: `/${skill}`,
       rawContentType: SKILL_RUN_CONTENT_TYPE,
-    });
+      listedFor,
+    };
+    deps.pending.push(scope, run);
     return;
   }
 

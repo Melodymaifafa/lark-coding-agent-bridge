@@ -34,6 +34,7 @@ interface HandlerMap {
 
 interface FakeLarkChannel {
   handlers: HandlerMap;
+  sent: Array<{ chatId: string; content: unknown }>;
   botIdentity: { openId: string; name: string };
   rawClient: unknown;
   on(handlers: HandlerMap): void;
@@ -81,13 +82,42 @@ describe('/skills run click → agent prompt', () => {
     expect(first?.prompt).not.toContain('/handoff');
     expect(second?.prompt).toBe('/handoff');
   });
+
+  // `/ws use` and `/new` move the scope without touching the queue, so a
+  // click that passed its check while queued must be re-checked at run time.
+  it('does not run a queued click once the scope has moved to another cwd', async () => {
+    const h = await startHarness();
+
+    await h.click('handoff');
+    h.workspaces.setCwd('oc_chat', join(h.tmp.root, 'elsewhere'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(JSON.stringify(h.channel.sent[0]?.content)).toContain('工作目录');
+  });
+
+  it('does not run a queued click once the session it was listed in is gone', async () => {
+    const h = await startHarness();
+    h.sessions.set('oc_chat', 'sess-1', h.workspace);
+
+    await h.click('apps/web:deploy', 'sess-1');
+    h.sessions.clear('oc_chat');
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(JSON.stringify(h.channel.sent[0]?.content)).toContain('会话');
+  });
 });
 
 async function startHarness(): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
   agent: FakeAgentAdapter;
-  click(skill: string): Promise<void>;
+  sessions: SessionStore;
+  workspaces: WorkspaceStore;
+  /** The scope's cwd — what a fresh `/skills` card would carry. */
+  workspace: string;
+  click(skill: string, session?: string): Promise<void>;
 }> {
   const tmp = await createTmpProfile('skill-run-prompt-');
   const workspace = await realpath(tmp.workspace);
@@ -134,12 +164,17 @@ async function startHarness(): Promise<{
     tmp,
     channel,
     agent,
-    click: async (skill: string) => {
+    sessions,
+    workspaces,
+    workspace,
+    click: async (skill: string, session?: string) => {
       await channel.handlers.cardAction?.({
         chatId: 'oc_chat',
         messageId: 'om_skills_card',
         operator: { openId: 'ou_user', name: 'User' },
-        action: { value: { cmd: 'skills.run', arg: skill, cwd: workspace } },
+        action: {
+          value: { cmd: 'skills.run', arg: skill, cwd: workspace, ...(session ? { session } : {}) },
+        },
       } as unknown as CardActionEvent);
     },
   };
@@ -147,8 +182,10 @@ async function startHarness(): Promise<{
 
 function createFakeLarkChannel(): FakeLarkChannel {
   const handlers: HandlerMap = {};
+  const sent: FakeLarkChannel['sent'] = [];
   return {
     handlers,
+    sent,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
     rawClient: {
       request: vi.fn(async () => ({ data: { items: [] } })),
@@ -182,7 +219,9 @@ function createFakeLarkChannel(): FakeLarkChannel {
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
-    async send() {},
+    async send(chatId, content) {
+      sent.push({ chatId, content });
+    },
     async stream(_chatId, input) {
       if (isMarkdownStreamInput(input)) {
         await input.markdown({ setContent: async () => {} });

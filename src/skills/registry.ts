@@ -15,6 +15,7 @@
  * they keep their name and carry `origin: 'builtin'` with no summary, so the
  * card can say so rather than silently showing a blank line.
  */
+import type { NormalizedMessage } from '@larksuite/channel';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -57,9 +58,47 @@ export interface SkillCatalog {
  */
 export const SKILL_RUN_CONTENT_TYPE = 'skill_run';
 
-export function isSkillRunMessage(msg: { rawContentType: string }): boolean {
+/** Where a `/skills` card listed its skills: a cwd and, once run, a session. */
+export interface SkillCardScope {
+  cwd?: string;
+  session?: string;
+}
+
+/**
+ * A queued run click. `listedFor` is its card's scope, re-checked right
+ * before the run starts: the click may wait behind a run, and `/ws use`,
+ * `/new` or `/resume` can move the scope meanwhile.
+ */
+export type SkillRunMessage = NormalizedMessage & { listedFor: SkillCardScope };
+
+export function isSkillRunMessage(msg: NormalizedMessage): msg is SkillRunMessage {
   return msg.rawContentType === SKILL_RUN_CONTENT_TYPE;
 }
+
+export type SkillCardStaleness = 'cwd' | 'session';
+
+/**
+ * Why a card listed for `listed` must not run a skill in `current`, if it
+ * mustn't. In another cwd the same name could be a different skill or none
+ * at all; nested monorepo skills load per session, so a card listed in one
+ * session is stale after `/new` or `/resume`. A card listed before the
+ * scope's first run carries no session — that fresh set is what every
+ * session in this cwd starts with, so it stays valid.
+ */
+export function skillCardStaleness(
+  listed: SkillCardScope,
+  current: SkillCardScope,
+): SkillCardStaleness | undefined {
+  if (!listed.cwd || listed.cwd !== current.cwd) return 'cwd';
+  if (listed.session && listed.session !== current.session) return 'session';
+  return undefined;
+}
+
+/** What the user is told when a stale card's run click is refused. */
+export const STALE_SKILL_CARD_NOTICE: Record<SkillCardStaleness, string> = {
+  cwd: '⚠️ 这张技能卡是在另一个工作目录下列出的，当前目录已经变了，没有运行。请重新发送 `/skills` 再点。',
+  session: '⚠️ 这张技能卡是在之前的会话里列出的，现在已经换了会话，没有运行。请重新发送 `/skills` 再点。',
+};
 
 /** Longest summary we keep; anything past this is elided on one line. */
 const SUMMARY_MAX_CHARS = 110;

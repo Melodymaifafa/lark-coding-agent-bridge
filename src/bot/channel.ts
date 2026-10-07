@@ -49,7 +49,12 @@ import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
-import { isSkillRunMessage, rememberSkillCatalog } from '../skills/registry';
+import {
+  isSkillRunMessage,
+  rememberSkillCatalog,
+  skillCardStaleness,
+  STALE_SKILL_CARD_NOTICE,
+} from '../skills/registry';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -703,6 +708,22 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
+  // A `/skills` run click was checked against its card when clicked, but it
+  // may have queued behind a run since — and `/ws use`, `/new`, `/resume`
+  // move the scope without touching the queue. Re-check here, with nothing
+  // awaited before `startRunFlow` reads the cwd, so the skill never runs in
+  // a cwd or session its card wasn't listed for.
+  if (isSkillRunMessage(firstMsg)) {
+    const stale = skillCardStaleness(firstMsg.listedFor, {
+      cwd: workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default,
+      session: sessions.getRaw(scope)?.sessionId,
+    });
+    if (stale) {
+      log.info('flush', `skill-run-stale-${stale}`, { scope });
+      await channel.send(chatId, { markdown: STALE_SKILL_CARD_NOTICE[stale] }, sendOpts);
+      return;
+    }
+  }
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
