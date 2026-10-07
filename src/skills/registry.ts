@@ -13,7 +13,9 @@
  * file, which Claude Code still loads as a skill. Claude Code's built-in
  * skills are compiled into the CLI binary and have no `SKILL.md` on disk —
  * they keep their name and carry `origin: 'builtin'` with no summary, so the
- * card can say so rather than silently showing a blank line.
+ * card can say so rather than silently showing a blank line. Skills synced
+ * from the user's account are reported under a namespace that is no plugin
+ * (`anthropic-skills:pdf`) and read from `~/.claude/skills/synced/`.
  */
 import type { NormalizedMessage } from '@larksuite/channel';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
@@ -22,7 +24,16 @@ import { basename, dirname, join, resolve } from 'node:path';
 import type { AgentPluginRef, AgentSkillListing } from '../agent/types';
 
 /** Where a skill's definition lives. Drives the label shown on the card. */
-export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin';
+export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin' | 'synced';
+
+/**
+ * Namespace Claude Code gives skills synced from the user's Anthropic
+ * account. It looks like a plugin prefix but is not one — the init event's
+ * `plugins` never carries it and nothing under `~/.claude/plugins` is named
+ * that — so its skills are read from `~/.claude/skills/synced/` instead. A
+ * real plugin by this name still wins, so an installed one keeps working.
+ */
+const SYNCED_SKILL_NAMESPACE = 'anthropic-skills';
 
 export interface SkillSpec {
   /**
@@ -134,7 +145,12 @@ function describeSkill(
       if (found) return { name, ...found, plugin: prefix, origin: 'plugin' };
     }
     if (owners.length === 0) {
-      // Not a plugin: a directory-qualified nested project skill such as
+      // Not a plugin: a skill synced from the account, whose files live under
+      // `skills/synced/` rather than in any plugin directory.
+      if (prefix === SYNCED_SKILL_NAMESPACE) {
+        return { name, ...findSyncedSkill(bare), origin: 'synced' };
+      }
+      // Or a directory-qualified nested project skill such as
       // `apps/web:deploy`, living in `apps/web/.claude/skills/deploy` —
       // named after its directory, so no frontmatter rename applies.
       const found = firstFound(roots, (root) =>
@@ -192,6 +208,60 @@ function findCommand(
  */
 function readCommandFile(commandsDir: string, name: string): SkillFound | undefined {
   return findSkillFile(`${join(commandsDir, ...name.split(':'))}.md`);
+}
+
+/**
+ * Summary for an account-synced skill invoked as `anthropic-skills:<bare>`.
+ * Each sync bucket is a directory named after account ids, so all of them are
+ * searched rather than any one name being hardcoded; a zero-byte
+ * `.bucket-<ids>` marker sits beside them and is skipped. The skill's own
+ * `SKILL.md` wins; a bucket's `manifest.json` — the catalog of what the
+ * account holds — covers a skill whose files have not been pulled down. No
+ * text anywhere means no summary, never "no such skill": the name already
+ * says the skill exists.
+ */
+function findSyncedSkill(bare: string): SkillFound {
+  const synced = join(homedir(), '.claude', 'skills', 'synced');
+  let buckets: string[];
+  try {
+    buckets = readdirSync(synced).sort();
+  } catch {
+    return {};
+  }
+  let fromManifest: SkillFound | undefined;
+  for (const bucket of buckets) {
+    if (bucket.startsWith('.')) continue;
+    const file = findSkillFile(join(synced, bucket, bare, 'SKILL.md'));
+    if (file?.summary !== undefined) return file;
+    fromManifest ??= manifestSummary(join(synced, bucket, 'manifest.json'), bare);
+  }
+  return fromManifest ?? {};
+}
+
+/**
+ * `description` for `bare` in one sync bucket's `manifest.json`. Undefined
+ * when the file is missing, unparseable, or lists no such skill — so the
+ * search moves on to the next bucket.
+ */
+function manifestSummary(path: string, bare: string): SkillFound | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const skills = (parsed as { skills?: unknown }).skills;
+  if (!Array.isArray(skills)) return undefined;
+  for (const entry of skills) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const skill = entry as { name?: unknown; description?: unknown };
+    if (skill.name !== bare) continue;
+    return typeof skill.description === 'string' && skill.description.trim()
+      ? { summary: condense(skill.description) }
+      : {};
+  }
+  return undefined;
 }
 
 /**

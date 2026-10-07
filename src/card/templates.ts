@@ -277,11 +277,21 @@ export const SKILLS_CARD_LIMIT = 10;
 
 const SKILLS_CARD_TITLE = '🧠 Agent 技能';
 
+/** Origin labels worth showing; a project, personal or plugin skill needs none. */
+const SKILL_ORIGIN_LABEL: Partial<Record<SkillSpec['origin'], string>> = {
+  builtin: ' _(内置)_',
+  synced: ' _(账号同步)_',
+};
+
 function skillLine(spec: SkillSpec): string {
-  const origin = spec.origin === 'builtin' ? ' _(内置)_' : '';
-  const summary = spec.summary
-    ? escapeMd(spec.summary)
-    : '_无说明（Claude Code 内置技能，说明不在本机文件里）_';
+  const origin = SKILL_ORIGIN_LABEL[spec.origin] ?? '';
+  // Only a built-in's missing summary is explained by the CLI binary; for
+  // anything else say no more than that there is none.
+  const missing =
+    spec.origin === 'builtin'
+      ? '_无说明（Claude Code 内置技能，说明不在本机文件里）_'
+      : '_无说明_';
+  const summary = spec.summary ? escapeMd(spec.summary) : missing;
   return `\`/${escapeMd(spec.name)}\`${origin} — ${summary}`;
 }
 

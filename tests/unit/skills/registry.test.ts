@@ -17,6 +17,31 @@ function writeSkill(root: string, name: string, frontmatter: string): void {
   writeFileSync(join(dir, 'SKILL.md'), `---\n${frontmatter}\n---\n\nbody\n`, 'utf8');
 }
 
+/** Run `fn` with `home` as the home directory, restoring the real one after. */
+function withHome<T>(home: string, fn: () => T): T {
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** A sync bucket directory, named after account ids the way the real one is. */
+function syncedBucket(home: string, bucket: string): string {
+  const dir = join(home, '.claude', 'skills', 'synced', bucket);
+  mkdirSync(dir, { recursive: true });
+  // A zero-byte `.bucket-<ids>` marker sits beside the buckets; the scan has
+  // to walk past it rather than treat it as a bucket.
+  writeFileSync(join(home, '.claude', 'skills', 'synced', `.bucket-${bucket}`), '', 'utf8');
+  return dir;
+}
+
 describe('agent skill registry', () => {
   let root: string;
 
@@ -228,6 +253,89 @@ describe('agent skill registry', () => {
 
     const [spec] = describeSkills({ names: ['lint-all'], plugins: [] }, join(worktree, 'src'));
     expect(spec).toEqual({ name: 'lint-all', summary: 'Lint everything.', origin: 'project' });
+  });
+
+  it('describes an account-synced skill from its SKILL.md, not as a plugin', () => {
+    // `anthropic-skills:<x>` is the namespace Claude Code gives skills synced
+    // from the account; no plugin by that name exists, so the old code labeled
+    // them plugins with no summary.
+    const home = join(root, 'synced-home');
+    writeSkill(
+      syncedBucket(home, 'acct-9f1_user-3c2'),
+      'pdf',
+      'name: pdf\ndescription: Work with PDF files.',
+    );
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:pdf'], plugins: [] }, join(root, 'proj')),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:pdf', summary: 'Work with PDF files.', origin: 'synced' },
+    ]);
+  });
+
+  it("falls back to a bucket's manifest.json when the skill's files are not on disk", () => {
+    // Bucket names are account ids, so every bucket is searched — none of
+    // them can be hardcoded.
+    const home = join(root, 'manifest-home');
+    syncedBucket(home, 'acct-aaa_user-111');
+    const second = syncedBucket(home, 'acct-bbb_user-222');
+    writeFileSync(
+      join(second, 'manifest.json'),
+      JSON.stringify({
+        lastUpdated: 1,
+        skills: [
+          { skillId: 'skill_01', name: 'viral-hooks', description: 'Hooks that travel.' },
+          { skillId: 'xlsx', name: 'xlsx', description: 'Spreadsheets.' },
+        ],
+      }),
+      'utf8',
+    );
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:viral-hooks'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:viral-hooks', summary: 'Hooks that travel.', origin: 'synced' },
+    ]);
+  });
+
+  it('marks a synced skill with no description anywhere as synced and summary-less', () => {
+    // A synced name with nothing to read is still an account-synced skill:
+    // the label must say so instead of claiming it is built into the CLI.
+    const home = join(root, 'bare-home');
+    syncedBucket(home, 'acct-ccc_user-333');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:schedule'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([{ name: 'anthropic-skills:schedule', origin: 'synced' }]);
+    expect(specs[0]?.summary).toBeUndefined();
+  });
+
+  it('still prefers a real plugin that happens to be named anthropic-skills', () => {
+    const home = join(root, 'plugin-wins-home');
+    writeSkill(syncedBucket(home, 'acct-ddd_user-444'), 'pdf', 'description: Synced copy.');
+    const pluginPath = join(root, 'plugins', 'anthropic-skills');
+    writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills(
+        {
+          names: ['anthropic-skills:pdf'],
+          plugins: [{ name: 'anthropic-skills', path: pluginPath }],
+        },
+        root,
+      ),
+    );
+    expect(specs).toEqual([
+      {
+        name: 'anthropic-skills:pdf',
+        summary: 'Plugin copy.',
+        plugin: 'anthropic-skills',
+        origin: 'plugin',
+      },
+    ]);
   });
 
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
