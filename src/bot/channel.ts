@@ -756,10 +756,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.info('session', 'set-thread', { threadId: evt.threadId });
     }
     // Claude Code reports its live skill list on every run's init event.
-    // Caching it here makes `/skills` instant and exact after the first
-    // turn, so the command only pays for a probe spawn on a cold scope.
+    // Caching it here (per session — nested monorepo skills differ between
+    // sessions) makes `/skills` instant and exact after the first turn, so
+    // the command only pays for a probe spawn on a cold session.
     if (evt.type === 'system' && evt.skills) {
-      rememberSkillCatalog(capability.agentId, evt.cwd ?? cwd, evt.skills);
+      rememberSkillCatalog(capability.agentId, evt.cwd ?? cwd, evt.sessionId, evt.skills);
     }
   };
 

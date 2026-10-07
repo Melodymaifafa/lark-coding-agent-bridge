@@ -87,11 +87,30 @@ describe('/skills — agent skill discovery', () => {
       skills: { names: ['probed'], plugins: [] },
     });
     // Same thing channel.ts does when it sees a run's init event.
-    rememberSkillCatalog(h.agent.id, h.cwd, { names: ['from-run'], plugins: [] });
+    h.sessions.set('chat-1', 'sess-1', h.cwd);
+    rememberSkillCatalog(h.agent.id, h.cwd, 'sess-1', { names: ['from-run'], plugins: [] });
 
     await expect(h.run('/skills')).resolves.toBe(true);
     expect(JSON.stringify(h.lastCard())).toContain('/from-run');
     expect(h.agent.listSkillsCalls).toHaveLength(0);
+  });
+
+  it("does not show another session's list for the same cwd", async () => {
+    const h = await createHarness({
+      skills: { names: ['probed'], plugins: [] },
+    });
+    // Another chat's session in this cwd loaded a nested skill this chat's
+    // session never touched.
+    rememberSkillCatalog(h.agent.id, h.cwd, 'other-sess', {
+      names: ['apps/web:deploy'],
+      plugins: [],
+    });
+
+    await expect(h.run('/skills')).resolves.toBe(true);
+    const card = JSON.stringify(h.lastCard());
+    expect(card).toContain('/probed');
+    expect(card).not.toContain('apps/web:deploy');
+    expect(h.agent.listSkillsCalls).toHaveLength(1);
   });
 
   it('says the lookup failed rather than showing an empty list', async () => {
@@ -133,6 +152,7 @@ interface Harness {
   tmp: TmpProfile;
   channel: FakeChannel;
   agent: FakeAgentAdapter;
+  sessions: SessionStore;
   cwd: string;
   run(content: string): Promise<boolean>;
   lastCard(): unknown;
@@ -189,6 +209,7 @@ async function createHarness(
     tmp,
     channel,
     agent,
+    sessions,
     cwd,
     lastCard: () => (channel.sent.at(-1)?.content as { card?: unknown } | undefined)?.card,
     run: (content: string) =>

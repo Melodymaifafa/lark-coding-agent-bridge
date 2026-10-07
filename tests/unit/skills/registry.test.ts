@@ -102,6 +102,28 @@ describe('agent skill registry', () => {
     });
   });
 
+  it('finds a skill renamed by frontmatter `name` in a differently named directory', () => {
+    // Claude Code takes the command from frontmatter `name` when set, so
+    // `deploy` can live in `deploy-staging/`. It must not read as built-in.
+    const cwd = join(root, 'renamed');
+    writeSkill(
+      join(cwd, '.claude', 'skills'),
+      'deploy-staging',
+      'name: deploy\ndescription: Deploy to staging.',
+    );
+    const pluginPath = join(root, 'plugins', 'tools');
+    writeSkill(join(pluginPath, 'skills'), 'review', 'name: "fancy"\ndescription: Fancy review.');
+
+    const specs = describeSkills(
+      { names: ['deploy', 'tools:fancy'], plugins: [{ name: 'tools', path: pluginPath }] },
+      cwd,
+    );
+    expect(specs).toEqual([
+      { name: 'deploy', summary: 'Deploy to staging.', origin: 'project' },
+      { name: 'tools:fancy', summary: 'Fancy review.', plugin: 'tools', origin: 'plugin' },
+    ]);
+  });
+
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
     // Claude Code compiles its own skills into the CLI binary, so there is
     // nothing to read. The skill must still be listed — dropping it would
@@ -143,20 +165,21 @@ describe('agent skill registry', () => {
     expect(specs.map((s) => s.name)).toEqual(['alpha', 'mid', 'zeta']);
   });
 
-  it('matches by name first, then falls back to description text', () => {
+  it('matches names and descriptions, name hits first', () => {
     const cwd = join(root, 'match');
     const skills = join(cwd, '.claude', 'skills');
     writeSkill(skills, 'handoff', 'description: Write a session handoff note.');
     writeSkill(skills, 'diagnose', 'description: Debug a hard bug step by step.');
-    const catalog = rememberSkillCatalog('claude', cwd, {
-      names: ['handoff', 'diagnose'],
+    writeSkill(skills, 'bug-report', 'description: File an issue.');
+    const catalog = rememberSkillCatalog('claude', cwd, undefined, {
+      names: ['handoff', 'diagnose', 'bug-report'],
       plugins: [],
     });
 
     expect(matchSkills(catalog, 'hand').map((s) => s.name)).toEqual(['handoff']);
-    // No name contains "bug", so the description is searched instead.
-    expect(matchSkills(catalog, 'bug').map((s) => s.name)).toEqual(['diagnose']);
-    expect(matchSkills(catalog, '')).toHaveLength(2);
+    // A name hit must not hide a skill that only its description matches.
+    expect(matchSkills(catalog, 'bug').map((s) => s.name)).toEqual(['bug-report', 'diagnose']);
+    expect(matchSkills(catalog, '')).toHaveLength(3);
     expect(matchSkills(catalog, 'nothing-here')).toEqual([]);
   });
 
@@ -166,15 +189,35 @@ describe('agent skill registry', () => {
     mkdirSync(cwdA, { recursive: true });
     mkdirSync(cwdB, { recursive: true });
 
-    rememberSkillCatalog('claude', cwdA, { names: ['one'], plugins: [] });
-    rememberSkillCatalog('claude', cwdB, { names: ['one', 'two'], plugins: [] });
+    rememberSkillCatalog('claude', cwdA, undefined, { names: ['one'], plugins: [] });
+    rememberSkillCatalog('claude', cwdB, undefined, { names: ['one', 'two'], plugins: [] });
 
-    expect(cachedSkillCatalog('claude', cwdA)?.skills).toHaveLength(1);
-    expect(cachedSkillCatalog('claude', cwdB)?.skills).toHaveLength(2);
-    expect(cachedSkillCatalog('codex', cwdA)).toBeUndefined();
+    expect(cachedSkillCatalog('claude', cwdA, undefined)?.skills).toHaveLength(1);
+    expect(cachedSkillCatalog('claude', cwdB, undefined)?.skills).toHaveLength(2);
+    expect(cachedSkillCatalog('codex', cwdA, undefined)).toBeUndefined();
 
-    rememberSkillCatalog('claude', cwdA, { names: ['one', 'three', 'four'], plugins: [] });
-    expect(cachedSkillCatalog('claude', cwdA)?.skills).toHaveLength(3);
+    rememberSkillCatalog('claude', cwdA, undefined, {
+      names: ['one', 'three', 'four'],
+      plugins: [],
+    });
+    expect(cachedSkillCatalog('claude', cwdA, undefined)?.skills).toHaveLength(3);
+  });
+
+  it('keeps sessions sharing a cwd apart', () => {
+    // A nested monorepo skill loads only in the session that touched its
+    // directory, so one chat's list must not leak into another's.
+    const cwd = join(root, 'mono');
+    mkdirSync(cwd, { recursive: true });
+
+    rememberSkillCatalog('claude', cwd, 'sess-a', {
+      names: ['deploy', 'apps/web:deploy'],
+      plugins: [],
+    });
+    rememberSkillCatalog('claude', cwd, 'sess-b', { names: ['deploy'], plugins: [] });
+
+    expect(cachedSkillCatalog('claude', cwd, 'sess-a')?.skills).toHaveLength(2);
+    expect(cachedSkillCatalog('claude', cwd, 'sess-b')?.skills).toHaveLength(1);
+    expect(cachedSkillCatalog('claude', cwd, undefined)).toBeUndefined();
   });
 
   it('keys the cache on the resolved real path', () => {
@@ -182,8 +225,12 @@ describe('agent skill registry', () => {
     // symlinked spelling; both must hit the same entry or every /skills
     // pays for a probe spawn.
     const real = mkdtempSync(join(tmpdir(), 'mel101-real-'));
-    rememberSkillCatalog('claude', real, { names: ['one'], plugins: [] });
-    const hit: SkillCatalog | undefined = cachedSkillCatalog('claude', join(real, '.', ''));
+    rememberSkillCatalog('claude', real, undefined, { names: ['one'], plugins: [] });
+    const hit: SkillCatalog | undefined = cachedSkillCatalog(
+      'claude',
+      join(real, '.', ''),
+      undefined,
+    );
     expect(hit?.skills).toHaveLength(1);
   });
 });

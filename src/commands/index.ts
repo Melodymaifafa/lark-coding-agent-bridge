@@ -866,7 +866,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 /**
  * `/skills [keyword]` — list the AGENT's skills (Claude Code `/skill-name`
  * entries), not the bridge's own commands. Names come from the agent
- * itself; a keyword filters by name, falling back to description text.
+ * itself; a keyword matches names and descriptions, name hits listed first.
  *
  * Three outcomes are kept apart on purpose: the agent has no skill
  * mechanism, the lookup failed, and the real list. An empty card must never
@@ -894,10 +894,19 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  let catalog: SkillCatalog | undefined = cachedSkillCatalog(ctx.agent.id, cwd);
+  // The list is per Claude session (nested monorepo skills load per
+  // session). A probe can only see a fresh session's set; caching it under
+  // this chat's session is still right until its next run replaces it.
+  const sessionId = ctx.sessions.getRaw(ctx.scope)?.sessionId;
+  let catalog: SkillCatalog | undefined = cachedSkillCatalog(ctx.agent.id, cwd, sessionId);
   if (!catalog) {
     try {
-      catalog = rememberSkillCatalog(ctx.agent.id, cwd, await ctx.agent.listSkills(cwd));
+      catalog = rememberSkillCatalog(
+        ctx.agent.id,
+        cwd,
+        sessionId,
+        await ctx.agent.listSkills(cwd),
+      );
     } catch (err) {
       log.fail('command', err, { cmd: '/skills' });
       reportMetric('command_fail', 1, { step: 'skills-probe' });

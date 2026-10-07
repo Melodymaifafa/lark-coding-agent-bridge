@@ -14,7 +14,7 @@
  * and carry `origin: 'builtin'` with no summary, so the card can say so
  * rather than silently showing a blank line.
  */
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { AgentPluginRef, AgentSkillListing } from '../agent/types';
@@ -42,6 +42,8 @@ export interface SkillCatalog {
   cwd: string;
   /** Agent that produced it (`claude`). */
   agentId: string;
+  /** Claude session the listing belongs to; absent for a fresh session. */
+  sessionId?: string;
   capturedAt: number;
 }
 
@@ -68,7 +70,8 @@ const SUMMARY_MAX_CHARS = 110;
  */
 export function describeSkills(listing: AgentSkillListing, cwd: string): SkillSpec[] {
   const roots = projectRoots(cwd);
-  const specs = listing.names.map((name) => describeSkill(name, listing.plugins, roots));
+  const lookup = skillLookup();
+  const specs = listing.names.map((name) => describeSkill(name, listing.plugins, roots, lookup));
   specs.sort((a, b) => a.name.localeCompare(b.name));
   return specs;
 }
@@ -77,6 +80,7 @@ function describeSkill(
   name: string,
   plugins: readonly AgentPluginRef[],
   roots: readonly string[],
+  lookup: SkillLookup,
 ): SkillSpec {
   const sep = name.indexOf(':');
   if (sep > 0) {
@@ -84,14 +88,15 @@ function describeSkill(
     const bare = name.slice(sep + 1);
     const owners = plugins.filter((p) => p.name === prefix);
     for (const p of owners) {
-      const summary = readSkillSummary(join(p.path, 'skills', bare, 'SKILL.md'));
+      const summary = lookup(join(p.path, 'skills'), bare);
       if (summary !== undefined) return { name, summary, plugin: prefix, origin: 'plugin' };
     }
     if (owners.length === 0) {
       // Not a plugin: a directory-qualified nested project skill such as
-      // `apps/web:deploy`, living in `apps/web/.claude/skills/deploy`.
-      const summary = firstSummary(
-        roots.map((root) => join(root, prefix, '.claude', 'skills', bare, 'SKILL.md')),
+      // `apps/web:deploy`, living in `apps/web/.claude/skills/deploy` —
+      // named after its directory, so no frontmatter rename applies.
+      const summary = firstSummary(roots, (root) =>
+        readSkillFile(join(root, prefix, '.claude', 'skills', bare, 'SKILL.md'))?.summary,
       );
       if (summary !== undefined) return { name, summary, origin: 'project' };
       // Plugin names never contain a slash.
@@ -101,10 +106,10 @@ function describeSkill(
   }
   // Same-name precedence follows Claude Code: a personal skill overrides a
   // project one, so the summary shown is the one the click will run.
-  const userSummary = readSkillSummary(join(homedir(), '.claude', 'skills', name, 'SKILL.md'));
+  const userSummary = lookup(join(homedir(), '.claude', 'skills'), name);
   if (userSummary !== undefined) return { name, summary: userSummary, origin: 'user' };
-  const projectSummary = firstSummary(
-    roots.map((root) => join(root, '.claude', 'skills', name, 'SKILL.md')),
+  const projectSummary = firstSummary(roots, (root) =>
+    lookup(join(root, '.claude', 'skills'), name),
   );
   if (projectSummary !== undefined) return { name, summary: projectSummary, origin: 'project' };
   // No SKILL.md anywhere the bridge can reach: a skill Claude Code ships
@@ -131,20 +136,66 @@ function projectRoots(cwd: string): string[] {
   }
 }
 
-function firstSummary(paths: readonly string[]): string | undefined {
-  for (const path of paths) {
-    const summary = readSkillSummary(path);
+function firstSummary(
+  roots: readonly string[],
+  read: (root: string) => string | undefined,
+): string | undefined {
+  for (const root of roots) {
+    const summary = read(root);
     if (summary !== undefined) return summary;
   }
   return undefined;
 }
 
+/** Summary of the skill invoked as `name` from one `skills` directory. */
+type SkillLookup = (skillsDir: string, name: string) => string | undefined;
+
 /**
- * Read the `description` field out of a `SKILL.md` YAML frontmatter block.
- * Returns undefined when the file is missing, has no frontmatter, or has no
- * description — all three mean "no summary available", never an error.
+ * A personal, project or plugin skill takes its command name from the
+ * frontmatter `name` when set, else from its directory — so a reported
+ * `deploy` may live in `deploy-staging/` with `name: deploy`. The
+ * same-named directory is tried first; each directory's renamed entries
+ * are scanned once per describe pass.
  */
-function readSkillSummary(path: string): string | undefined {
+function skillLookup(): SkillLookup {
+  const renamedByDir = new Map<string, Map<string, string | undefined>>();
+  return (skillsDir, name) => {
+    const direct = readSkillFile(join(skillsDir, name, 'SKILL.md'));
+    if (direct && (direct.name === undefined || direct.name === name)) return direct.summary;
+    let renamed = renamedByDir.get(skillsDir);
+    if (!renamed) {
+      renamed = renamedSkills(skillsDir);
+      renamedByDir.set(skillsDir, renamed);
+    }
+    // The directory name still invokes a renamed skill, so fall back to it.
+    return renamed.get(name) ?? direct?.summary;
+  };
+}
+
+/** Frontmatter `name` → summary, for skills whose `name` isn't their directory's. */
+function renamedSkills(skillsDir: string): Map<string, string | undefined> {
+  const renamed = new Map<string, string | undefined>();
+  let entries: string[];
+  try {
+    entries = readdirSync(skillsDir).sort();
+  } catch {
+    return renamed;
+  }
+  for (const entry of entries) {
+    const skill = readSkillFile(join(skillsDir, entry, 'SKILL.md'));
+    if (skill?.name && skill.name !== entry && !renamed.has(skill.name)) {
+      renamed.set(skill.name, skill.summary);
+    }
+  }
+  return renamed;
+}
+
+/**
+ * Read `name` and `description` out of a `SKILL.md` YAML frontmatter block.
+ * Returns undefined when the file is missing or has no frontmatter; a field
+ * that isn't there is just absent — "no summary available", never an error.
+ */
+function readSkillFile(path: string): { name?: string; summary?: string } | undefined {
   if (!existsSync(path)) return undefined;
   let text: string;
   try {
@@ -154,17 +205,21 @@ function readSkillSummary(path: string): string | undefined {
   }
   const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
   if (!block) return undefined;
-  const raw = extractDescription(block[1] ?? '');
-  if (!raw) return undefined;
-  return condense(raw);
+  const front = block[1] ?? '';
+  const name = unquote(extractField(front, 'name'));
+  const description = extractField(front, 'description');
+  return {
+    ...(name ? { name } : {}),
+    ...(description ? { summary: condense(description) } : {}),
+  };
 }
 
 /**
- * Minimal frontmatter reader for the one key we need. Handles `description:
- * text`, quoted values, and YAML block/continuation lines (`>-`, `|`, or a
- * plain indented wrap). Stops at the next top-level key.
+ * Minimal frontmatter reader for the few keys we need. Handles `key: text`,
+ * quoted values, and YAML block/continuation lines (`>-`, `|`, or a plain
+ * indented wrap). Stops at the next top-level key.
  */
-function extractDescription(front: string): string {
+function extractField(front: string, field: string): string {
   const lines = front.split(/\r?\n/);
   const parts: string[] = [];
   let collecting = false;
@@ -172,7 +227,7 @@ function extractDescription(front: string): string {
     const key = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(line);
     if (key) {
       if (collecting) break;
-      if (key[1]?.toLowerCase() !== 'description') continue;
+      if (key[1]?.toLowerCase() !== field) continue;
       collecting = true;
       const inline = (key[2] ?? '').trim();
       // `>-` / `|` introduce a block scalar; the value is on the next lines.
@@ -187,37 +242,52 @@ function extractDescription(front: string): string {
   return parts.join(' ').trim();
 }
 
+/** Strip one pair of wrapping quotes. */
+function unquote(s: string): string {
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    return s.slice(1, -1).trim();
+  }
+  return s;
+}
+
 /** Strip wrapping quotes, collapse whitespace, cut to a single card line. */
 function condense(raw: string): string {
-  let s = raw.replace(/\s+/g, ' ').trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    s = s.slice(1, -1).trim();
-  }
+  const s = unquote(raw.replace(/\s+/g, ' ').trim());
   if (s.length <= SUMMARY_MAX_CHARS) return s;
   return `${s.slice(0, SUMMARY_MAX_CHARS - 1).trimEnd()}…`;
 }
 
 /**
- * Skills whose name or summary contains `query` (case-insensitive). An empty
+ * Skills whose name or summary contains `query` (case-insensitive), name
+ * matches first so the closest hits survive the card's row cap. An empty
  * query returns the whole catalog — callers decide how many to render.
  */
 export function matchSkills(catalog: SkillCatalog, query: string): SkillSpec[] {
   const needle = query.replace(/^\//, '').trim().toLowerCase();
   if (!needle) return [...catalog.skills];
-  const byName = catalog.skills.filter((s) => s.name.toLowerCase().includes(needle));
-  if (byName.length > 0) return byName;
-  return catalog.skills.filter((s) => (s.summary ?? '').toLowerCase().includes(needle));
+  const nameHit = (s: SkillSpec): boolean => s.name.toLowerCase().includes(needle);
+  const byName = catalog.skills.filter(nameHit);
+  const bySummary = catalog.skills.filter(
+    (s) => !nameHit(s) && (s.summary ?? '').toLowerCase().includes(needle),
+  );
+  return [...byName, ...bySummary];
 }
 
 // ---------------------------------------------------------------------------
 // Cache
 //
 // Claude Code emits the skill list on EVERY run's `system/init` event, so a
-// normal chat turn refreshes this for free. `/skills` only pays for a probe
-// spawn when the scope has never run the agent in this cwd.
+// normal chat turn refreshes this for free. Entries are per Claude session:
+// skills nested below the startup directory load only once that session
+// touches their directory, so two chats in one monorepo can see different
+// lists. `/skills` only pays for a probe spawn when the chat's current
+// session (or, before its first run, the cwd's fresh-session list) is cold.
 // ---------------------------------------------------------------------------
 
 const catalogs = new Map<string, SkillCatalog>();
+
+/** Oldest entries are dropped past this many, so a long-lived daemon stays bounded. */
+const MAX_CATALOGS = 200;
 
 /**
  * Key on the resolved real path: the run flow caches under the realpath
@@ -225,34 +295,50 @@ const catalogs = new Map<string, SkillCatalog>();
  * `/cd`-configured path may still be the symlinked spelling. Without this
  * the two never match and `/skills` re-probes on every call.
  */
-function cacheKey(agentId: string, cwd: string): string {
+function cacheKey(agentId: string, cwd: string, sessionId: string | undefined): string {
   let resolved = cwd;
   try {
     resolved = realpathSync(cwd);
   } catch {
     // Directory gone or unreadable — key on the literal path instead.
   }
-  return `${agentId}\u0000${resolved}`;
+  return `${agentId}\u0000${resolved}\u0000${sessionId ?? ''}`;
 }
 
-/** Record a listing observed on a live run. Returns the catalog it built. */
+/**
+ * Record a listing for `sessionId` (undefined: a session that hasn't
+ * started yet). Returns the catalog it built.
+ */
 export function rememberSkillCatalog(
   agentId: string,
   cwd: string,
+  sessionId: string | undefined,
   listing: AgentSkillListing,
 ): SkillCatalog {
   const catalog: SkillCatalog = {
     skills: describeSkills(listing, cwd),
     cwd,
     agentId,
+    ...(sessionId ? { sessionId } : {}),
     capturedAt: Date.now(),
   };
-  catalogs.set(cacheKey(agentId, cwd), catalog);
+  const key = cacheKey(agentId, cwd, sessionId);
+  // Re-insert so Map order tracks recency and eviction drops the stalest.
+  catalogs.delete(key);
+  catalogs.set(key, catalog);
+  if (catalogs.size > MAX_CATALOGS) {
+    const oldest = catalogs.keys().next().value;
+    if (oldest !== undefined) catalogs.delete(oldest);
+  }
   return catalog;
 }
 
-export function cachedSkillCatalog(agentId: string, cwd: string): SkillCatalog | undefined {
-  return catalogs.get(cacheKey(agentId, cwd));
+export function cachedSkillCatalog(
+  agentId: string,
+  cwd: string,
+  sessionId: string | undefined,
+): SkillCatalog | undefined {
+  return catalogs.get(cacheKey(agentId, cwd, sessionId));
 }
 
 /** Test seam — the cache is process-global. */
