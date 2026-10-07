@@ -1,0 +1,46 @@
+# 跨系统测试。接入共享自动化时，调用桩的 ci.yml 和本仓库原来那份 CI 同名，把它整个
+# 盖掉了，于是测试只剩 Linux 一个系统（MEL-322）。这一份把丢掉的那部分补回来。
+#
+# 只留 macOS 和 Windows：Linux 那一份共享的 ci.yml 已经在跑，而且跑的是同样这四步
+# （接入时是照这个文件抄进覆盖值的），再跑一遍不多一条信息。
+# 合并闸门只要求「有检查且全绿」，不挑名字，所以这个文件和调用桩可以并存。
+name: Cross-OS tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  test:
+    name: Node 20 on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
