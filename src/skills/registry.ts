@@ -31,7 +31,9 @@ export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin' | 'synced';
  * account. It looks like a plugin prefix but is not one — the init event's
  * `plugins` never carries it and nothing under `~/.claude/plugins` is named
  * that — so its skills are read from `~/.claude/skills/synced/` instead. A
- * real plugin by this name still wins, so an installed one keeps working.
+ * real plugin by this name still loads, but Claude Code runs the synced skill
+ * when both have one by the same name, so the plugin copy is described only
+ * when no synced namesake exists.
  */
 const SYNCED_SKILL_NAMESPACE = 'anthropic-skills';
 
@@ -137,6 +139,12 @@ function describeSkill(
   if (sep > 0) {
     const prefix = name.slice(0, sep);
     const bare = name.slice(sep + 1);
+    // The reserved full name runs the synced skill even when a plugin by
+    // that name has a namesake, so the card must describe the synced copy.
+    if (prefix === SYNCED_SKILL_NAMESPACE) {
+      const synced = findSyncedSkill(bare);
+      if (synced) return { name, ...synced, origin: 'synced' };
+    }
     const owners = plugins.filter((p) => p.name === prefix);
     for (const p of owners) {
       // A plugin's `commands/*.md` files are skills too.
@@ -145,11 +153,9 @@ function describeSkill(
       if (found) return { name, ...found, plugin: prefix, origin: 'plugin' };
     }
     if (owners.length === 0) {
-      // Not a plugin: a skill synced from the account, whose files live under
-      // `skills/synced/` rather than in any plugin directory.
-      if (prefix === SYNCED_SKILL_NAMESPACE) {
-        return { name, ...findSyncedSkill(bare), origin: 'synced' };
-      }
+      // Not a plugin: a skill synced from the account, even with nothing
+      // under `skills/synced/` to read — the name already says it exists.
+      if (prefix === SYNCED_SKILL_NAMESPACE) return { name, origin: 'synced' };
       // Or a directory-qualified nested project skill such as
       // `apps/web:deploy`, living in `apps/web/.claude/skills/deploy` —
       // named after its directory, so no frontmatter rename applies.
@@ -216,26 +222,28 @@ function readCommandFile(commandsDir: string, name: string): SkillFound | undefi
  * searched rather than any one name being hardcoded; a zero-byte
  * `.bucket-<ids>` marker sits beside them and is skipped. The skill's own
  * `SKILL.md` wins; a bucket's `manifest.json` — the catalog of what the
- * account holds — covers a skill whose files have not been pulled down. No
- * text anywhere means no summary, never "no such skill": the name already
- * says the skill exists.
+ * account holds — covers a skill whose files have not been pulled down.
+ * Undefined when no bucket has the skill's folder or lists it, so a plugin
+ * named after the namespace can still describe its own skill.
  */
-function findSyncedSkill(bare: string): SkillFound {
+function findSyncedSkill(bare: string): SkillFound | undefined {
   const synced = join(homedir(), '.claude', 'skills', 'synced');
   let buckets: string[];
   try {
     buckets = readdirSync(synced).sort();
   } catch {
-    return {};
+    return undefined;
   }
+  let onDisk: SkillFound | undefined;
   let fromManifest: SkillFound | undefined;
   for (const bucket of buckets) {
     if (bucket.startsWith('.')) continue;
     const file = findSkillFile(join(synced, bucket, bare, 'SKILL.md'));
     if (file?.summary !== undefined) return file;
+    onDisk ??= file;
     fromManifest ??= manifestSummary(join(synced, bucket, 'manifest.json'), bare);
   }
-  return fromManifest ?? {};
+  return fromManifest ?? onDisk;
 }
 
 /**

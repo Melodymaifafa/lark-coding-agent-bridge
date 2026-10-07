@@ -313,9 +313,31 @@ describe('agent skill registry', () => {
     expect(specs[0]?.summary).toBeUndefined();
   });
 
-  it('still prefers a real plugin that happens to be named anthropic-skills', () => {
-    const home = join(root, 'plugin-wins-home');
+  it('describes the synced copy when a plugin named anthropic-skills has a namesake', () => {
+    // Claude Code reserves the namespace: `/anthropic-skills:pdf` runs the
+    // synced skill even with such a plugin loaded, so the card must say so.
+    const home = join(root, 'synced-wins-home');
     writeSkill(syncedBucket(home, 'acct-ddd_user-444'), 'pdf', 'description: Synced copy.');
+    const pluginPath = join(root, 'plugins', 'anthropic-skills');
+    writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills(
+        {
+          names: ['anthropic-skills:pdf'],
+          plugins: [{ name: 'anthropic-skills', path: pluginPath }],
+        },
+        root,
+      ),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:pdf', summary: 'Synced copy.', origin: 'synced' },
+    ]);
+  });
+
+  it('describes a plugin named anthropic-skills when no synced skill shares the name', () => {
+    const home = join(root, 'plugin-only-home');
+    writeSkill(syncedBucket(home, 'acct-eee_user-555'), 'xlsx', 'description: Spreadsheets.');
     const pluginPath = join(root, 'plugins', 'anthropic-skills');
     writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
 
