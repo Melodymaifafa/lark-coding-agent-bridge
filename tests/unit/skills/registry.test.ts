@@ -74,6 +74,32 @@ describe('agent skill registry', () => {
     }
   });
 
+  it('describes the personal skill even when it has no description', () => {
+    // Found-but-undescribed must still stop the lookup: falling through
+    // would show the project namesake's text, or label the skill built-in.
+    const home = join(root, 'home');
+    writeSkill(join(home, '.claude', 'skills'), 'deploy', 'name: deploy');
+    mkdirSync(join(home, '.claude', 'skills', 'notes'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'skills', 'notes', 'SKILL.md'), 'No frontmatter.\n');
+    const cwd = join(root, 'proj');
+    writeSkill(join(cwd, '.claude', 'skills'), 'deploy', 'description: Project deploy.');
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const specs = describeSkills({ names: ['deploy', 'notes'], plugins: [] }, cwd);
+      expect(specs).toEqual([
+        { name: 'deploy', origin: 'user' },
+        { name: 'notes', origin: 'user' },
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('finds a project skill in a parent directory up to the repo root', () => {
     const repo = join(root, 'repo');
     mkdirSync(join(repo, '.git'), { recursive: true });

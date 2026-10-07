@@ -562,6 +562,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  // A handled command drops what was queued before it — not what arrives
+  // while it runs: `/skills` on a cold cache waits on an agent probe (up
+  // to 30s), and messages sent meanwhile must still reach the agent.
+  const queuedBefore = pending.peek(scope);
   const handled = await tryHandleCommand({
     channel,
     msg,
@@ -585,7 +589,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     controls,
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
+    const dropped = pending.cancelOnly(scope, queuedBefore);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
     return;
   }

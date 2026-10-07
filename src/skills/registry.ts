@@ -90,19 +90,18 @@ function describeSkill(
     const owners = plugins.filter((p) => p.name === prefix);
     for (const p of owners) {
       // A plugin's `commands/*.md` files are skills too.
-      const summary =
-        lookup(join(p.path, 'skills'), bare) ??
-        readCommandFile(join(p.path, 'commands'), bare)?.summary;
-      if (summary !== undefined) return { name, summary, plugin: prefix, origin: 'plugin' };
+      const found =
+        lookup(join(p.path, 'skills'), bare) ?? readCommandFile(join(p.path, 'commands'), bare);
+      if (found) return { name, ...found, plugin: prefix, origin: 'plugin' };
     }
     if (owners.length === 0) {
       // Not a plugin: a directory-qualified nested project skill such as
       // `apps/web:deploy`, living in `apps/web/.claude/skills/deploy` —
       // named after its directory, so no frontmatter rename applies.
-      const summary = firstSummary(roots, (root) =>
-        readSkillFile(join(root, prefix, '.claude', 'skills', bare, 'SKILL.md'))?.summary,
+      const found = firstFound(roots, (root) =>
+        findSkillFile(join(root, prefix, '.claude', 'skills', bare, 'SKILL.md')),
       );
-      if (summary !== undefined) return { name, summary, origin: 'project' };
+      if (found) return { name, ...found, origin: 'project' };
       // Or a legacy command in a subdirectory: `frontend:component` is
       // `.claude/commands/frontend/component.md`.
       const command = findCommand(name, roots);
@@ -113,13 +112,13 @@ function describeSkill(
     return { name, plugin: prefix, origin: 'plugin' };
   }
   // Same-name precedence follows Claude Code: a personal skill overrides a
-  // project one, so the summary shown is the one the click will run.
-  const userSummary = lookup(join(homedir(), '.claude', 'skills'), name);
-  if (userSummary !== undefined) return { name, summary: userSummary, origin: 'user' };
-  const projectSummary = firstSummary(roots, (root) =>
-    lookup(join(root, '.claude', 'skills'), name),
-  );
-  if (projectSummary !== undefined) return { name, summary: projectSummary, origin: 'project' };
+  // project one, so the summary shown is the one the click will run. A
+  // found skill without a description still wins — never fall through to a
+  // lower-priority namesake's summary, or to built-in.
+  const user = lookup(join(homedir(), '.claude', 'skills'), name);
+  if (user) return { name, ...user, origin: 'user' };
+  const project = firstFound(roots, (root) => lookup(join(root, '.claude', 'skills'), name));
+  if (project) return { name, ...project, origin: 'project' };
   // A skill beats a same-named legacy command file, so commands come last.
   const command = findCommand(name, roots);
   if (command) return { name, ...command };
@@ -136,7 +135,7 @@ function describeSkill(
 function findCommand(
   name: string,
   roots: readonly string[],
-): { summary?: string; origin: 'user' | 'project' } | undefined {
+): (SkillFound & { origin: 'user' | 'project' }) | undefined {
   const personal = readCommandFile(join(homedir(), '.claude', 'commands'), name);
   if (personal) return { ...personal, origin: 'user' };
   for (const root of roots) {
@@ -152,11 +151,8 @@ function findCommand(
  * `frontend/component.md` is `frontend:component` — and command files take
  * no frontmatter `name`, so the path alone locates it.
  */
-function readCommandFile(commandsDir: string, name: string): { summary?: string } | undefined {
-  const path = `${join(commandsDir, ...name.split(':'))}.md`;
-  if (!existsSync(path)) return undefined;
-  const summary = readSkillFile(path)?.summary;
-  return summary !== undefined ? { summary } : {};
+function readCommandFile(commandsDir: string, name: string): SkillFound | undefined {
+  return findSkillFile(`${join(commandsDir, ...name.split(':'))}.md`);
 }
 
 /**
@@ -205,19 +201,37 @@ function mainCheckoutOf(root: string): string | undefined {
   }
 }
 
-function firstSummary(
+function firstFound(
   roots: readonly string[],
-  read: (root: string) => string | undefined,
-): string | undefined {
+  read: (root: string) => SkillFound | undefined,
+): SkillFound | undefined {
   for (const root of roots) {
-    const summary = read(root);
-    if (summary !== undefined) return summary;
+    const found = read(root);
+    if (found) return found;
   }
   return undefined;
 }
 
-/** Summary of the skill invoked as `name` from one `skills` directory. */
-type SkillLookup = (skillsDir: string, name: string) => string | undefined;
+/**
+ * A skill or command file that exists. `summary` is absent when it has no
+ * description — still found, so the lookup must stop here rather than fall
+ * through to a lower-priority namesake or to built-in.
+ */
+interface SkillFound {
+  summary?: string;
+}
+
+function skillFound(file: { summary?: string }): SkillFound {
+  return file.summary !== undefined ? { summary: file.summary } : {};
+}
+
+function findSkillFile(path: string): SkillFound | undefined {
+  const file = readSkillFile(path);
+  return file && skillFound(file);
+}
+
+/** The skill invoked as `name` in one `skills` directory, if it is there. */
+type SkillLookup = (skillsDir: string, name: string) => SkillFound | undefined;
 
 /**
  * A personal, project or plugin skill takes its command name from the
@@ -227,23 +241,23 @@ type SkillLookup = (skillsDir: string, name: string) => string | undefined;
  * are scanned once per describe pass.
  */
 function skillLookup(): SkillLookup {
-  const renamedByDir = new Map<string, Map<string, string | undefined>>();
+  const renamedByDir = new Map<string, Map<string, SkillFound>>();
   return (skillsDir, name) => {
     const direct = readSkillFile(join(skillsDir, name, 'SKILL.md'));
-    if (direct && (direct.name === undefined || direct.name === name)) return direct.summary;
+    if (direct && (direct.name === undefined || direct.name === name)) return skillFound(direct);
     let renamed = renamedByDir.get(skillsDir);
     if (!renamed) {
       renamed = renamedSkills(skillsDir);
       renamedByDir.set(skillsDir, renamed);
     }
     // The directory name still invokes a renamed skill, so fall back to it.
-    return renamed.get(name) ?? direct?.summary;
+    return renamed.get(name) ?? (direct && skillFound(direct));
   };
 }
 
-/** Frontmatter `name` → summary, for skills whose `name` isn't their directory's. */
-function renamedSkills(skillsDir: string): Map<string, string | undefined> {
-  const renamed = new Map<string, string | undefined>();
+/** Frontmatter `name` → skill, for skills whose `name` isn't their directory's. */
+function renamedSkills(skillsDir: string): Map<string, SkillFound> {
+  const renamed = new Map<string, SkillFound>();
   let entries: string[];
   try {
     entries = readdirSync(skillsDir).sort();
@@ -253,7 +267,7 @@ function renamedSkills(skillsDir: string): Map<string, string | undefined> {
   for (const entry of entries) {
     const skill = readSkillFile(join(skillsDir, entry, 'SKILL.md'));
     if (skill?.name && skill.name !== entry && !renamed.has(skill.name)) {
-      renamed.set(skill.name, skill.summary);
+      renamed.set(skill.name, skillFound(skill));
     }
   }
   return renamed;
@@ -261,8 +275,9 @@ function renamedSkills(skillsDir: string): Map<string, string | undefined> {
 
 /**
  * Read `name` and `description` out of a `SKILL.md` YAML frontmatter block.
- * Returns undefined when the file is missing or has no frontmatter; a field
- * that isn't there is just absent — "no summary available", never an error.
+ * Returns undefined only when the file is missing: an unreadable file, one
+ * with no frontmatter, or a field that isn't there just leaves that field
+ * absent — "no summary available", never "no such skill".
  */
 function readSkillFile(path: string): { name?: string; summary?: string } | undefined {
   if (!existsSync(path)) return undefined;
@@ -270,10 +285,10 @@ function readSkillFile(path: string): { name?: string; summary?: string } | unde
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    return undefined;
+    return {};
   }
   const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-  if (!block) return undefined;
+  if (!block) return {};
   const front = block[1] ?? '';
   const name = unquote(extractField(front, 'name'));
   const description = extractField(front, 'description');
