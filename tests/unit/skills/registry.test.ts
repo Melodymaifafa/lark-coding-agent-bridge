@@ -17,6 +17,31 @@ function writeSkill(root: string, name: string, frontmatter: string): void {
   writeFileSync(join(dir, 'SKILL.md'), `---\n${frontmatter}\n---\n\nbody\n`, 'utf8');
 }
 
+/** Run `fn` with `home` as the home directory, restoring the real one after. */
+function withHome<T>(home: string, fn: () => T): T {
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** A sync bucket directory, named after account ids the way the real one is. */
+function syncedBucket(home: string, bucket: string): string {
+  const dir = join(home, '.claude', 'skills', 'synced', bucket);
+  mkdirSync(dir, { recursive: true });
+  // A zero-byte `.bucket-<ids>` marker sits beside the buckets; the scan has
+  // to walk past it rather than treat it as a bucket.
+  writeFileSync(join(home, '.claude', 'skills', 'synced', `.bucket-${bucket}`), '', 'utf8');
+  return dir;
+}
+
 describe('agent skill registry', () => {
   let root: string;
 
@@ -228,6 +253,243 @@ describe('agent skill registry', () => {
 
     const [spec] = describeSkills({ names: ['lint-all'], plugins: [] }, join(worktree, 'src'));
     expect(spec).toEqual({ name: 'lint-all', summary: 'Lint everything.', origin: 'project' });
+  });
+
+  it('describes an account-synced skill from its SKILL.md, not as a plugin', () => {
+    // `anthropic-skills:<x>` is the namespace Claude Code gives skills synced
+    // from the account; no plugin by that name exists, so the old code labeled
+    // them plugins with no summary.
+    const home = join(root, 'synced-home');
+    writeSkill(
+      syncedBucket(home, 'acct-9f1_user-3c2'),
+      'pdf',
+      'name: pdf\ndescription: Work with PDF files.',
+    );
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:pdf'], plugins: [] }, join(root, 'proj')),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:pdf', summary: 'Work with PDF files.', origin: 'synced' },
+    ]);
+  });
+
+  it("falls back to a bucket's manifest.json when the skill's files are not on disk", () => {
+    // Bucket names are account ids, so every bucket is searched — none of
+    // them can be hardcoded.
+    const home = join(root, 'manifest-home');
+    syncedBucket(home, 'acct-aaa_user-111');
+    const second = syncedBucket(home, 'acct-bbb_user-222');
+    writeFileSync(
+      join(second, 'manifest.json'),
+      JSON.stringify({
+        lastUpdated: 1,
+        skills: [
+          { skillId: 'skill_01', name: 'viral-hooks', description: 'Hooks that travel.' },
+          { skillId: 'xlsx', name: 'xlsx', description: 'Spreadsheets.' },
+        ],
+      }),
+      'utf8',
+    );
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:viral-hooks'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:viral-hooks', summary: 'Hooks that travel.', origin: 'synced' },
+    ]);
+  });
+
+  it('marks a synced skill with no description anywhere as synced and summary-less', () => {
+    // A synced name with nothing to read is still an account-synced skill:
+    // the label must say so instead of claiming it is built into the CLI.
+    const home = join(root, 'bare-home');
+    syncedBucket(home, 'acct-ccc_user-333');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:schedule'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([{ name: 'anthropic-skills:schedule', origin: 'synced' }]);
+    expect(specs[0]?.summary).toBeUndefined();
+  });
+
+  it('describes the synced copy when a plugin named anthropic-skills has a namesake', () => {
+    // Claude Code reserves the namespace: `/anthropic-skills:pdf` runs the
+    // synced skill even with such a plugin loaded, so the card must say so.
+    const home = join(root, 'synced-wins-home');
+    writeSkill(syncedBucket(home, 'acct-ddd_user-444'), 'pdf', 'description: Synced copy.');
+    const pluginPath = join(root, 'plugins', 'anthropic-skills');
+    writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills(
+        {
+          names: ['anthropic-skills:pdf'],
+          plugins: [{ name: 'anthropic-skills', path: pluginPath }],
+        },
+        root,
+      ),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:pdf', summary: 'Synced copy.', origin: 'synced' },
+    ]);
+  });
+
+  it('describes a plugin named anthropic-skills when no synced skill shares the name', () => {
+    const home = join(root, 'plugin-only-home');
+    writeSkill(syncedBucket(home, 'acct-eee_user-555'), 'xlsx', 'description: Spreadsheets.');
+    const pluginPath = join(root, 'plugins', 'anthropic-skills');
+    writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills(
+        {
+          names: ['anthropic-skills:pdf'],
+          plugins: [{ name: 'anthropic-skills', path: pluginPath }],
+        },
+        root,
+      ),
+    );
+    expect(specs).toEqual([
+      {
+        name: 'anthropic-skills:pdf',
+        summary: 'Plugin copy.',
+        plugin: 'anthropic-skills',
+        origin: 'plugin',
+      },
+    ]);
+  });
+
+  it('describes the plugin copy over a stale synced namesake', () => {
+    // An API-key session loads no synced skills, though an earlier signed-in
+    // session's `pdf` stays on disk. Its unlisted `xlsx` shows the bucket is
+    // not loaded, so `/anthropic-skills:pdf` runs the plugin's skill.
+    const home = join(root, 'stale-plugin-home');
+    const bucket = syncedBucket(home, 'acct-kkk_user-111');
+    writeSkill(bucket, 'pdf', 'description: Stale synced copy.');
+    writeSkill(bucket, 'xlsx', 'description: Spreadsheets.');
+    const pluginPath = join(root, 'plugins', 'anthropic-skills');
+    writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills(
+        {
+          names: ['anthropic-skills:pdf'],
+          plugins: [{ name: 'anthropic-skills', path: pluginPath }],
+        },
+        root,
+      ),
+    );
+    expect(specs).toEqual([
+      {
+        name: 'anthropic-skills:pdf',
+        summary: 'Plugin copy.',
+        plugin: 'anthropic-skills',
+        origin: 'plugin',
+      },
+    ]);
+  });
+
+  it('describes a synced skill listed under its short name, not as a built-in', () => {
+    // Claude Code v2.1.281+ lists a synced skill as plain `pdf` while no
+    // other command uses that name.
+    const home = join(root, 'short-name-home');
+    writeSkill(syncedBucket(home, 'acct-fff_user-666'), 'pdf', 'description: Work with PDF files.');
+
+    const specs = withHome(home, () => describeSkills({ names: ['pdf'], plugins: [] }, root));
+    expect(specs).toEqual([{ name: 'pdf', summary: 'Work with PDF files.', origin: 'synced' }]);
+  });
+
+  it('leaves the short name to the local skill that shadows a synced namesake', () => {
+    // The local skill keeps `/deploy`; the synced one runs only by its full name.
+    const home = join(root, 'shadowed-home');
+    writeSkill(join(home, '.claude', 'skills'), 'deploy', 'description: Local deploy.');
+    writeSkill(syncedBucket(home, 'acct-ggg_user-777'), 'deploy', 'description: Synced deploy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['deploy', 'anthropic-skills:deploy'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:deploy', summary: 'Synced deploy.', origin: 'synced' },
+      { name: 'deploy', summary: 'Local deploy.', origin: 'user' },
+    ]);
+  });
+
+  it('keeps a built-in short name built-in when a synced namesake is listed in full', () => {
+    // A built-in owns `/simplify`, so the synced copy is listed only as
+    // `anthropic-skills:simplify` and the short name must not borrow its text.
+    const home = join(root, 'builtin-shadow-home');
+    writeSkill(syncedBucket(home, 'acct-hhh_user-888'), 'simplify', 'description: Synced copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['simplify', 'anthropic-skills:simplify'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:simplify', summary: 'Synced copy.', origin: 'synced' },
+      { name: 'simplify', origin: 'builtin' },
+    ]);
+  });
+
+  it('keeps a built-in short name built-in beside a stale sync cache', () => {
+    // An API-key session loads no synced skills, though an earlier signed-in
+    // session's downloads stay on disk: `pdf` missing from the listing shows
+    // the bucket is not loaded, so `/simplify` is the built-in alone.
+    const home = join(root, 'stale-cache-home');
+    const bucket = syncedBucket(home, 'acct-iii_user-999');
+    writeSkill(bucket, 'simplify', 'description: Stale synced copy.');
+    writeSkill(bucket, 'pdf', 'description: Work with PDF files.');
+
+    const specs = withHome(home, () => describeSkills({ names: ['simplify'], plugins: [] }, root));
+    expect(specs).toEqual([{ name: 'simplify', origin: 'builtin' }]);
+  });
+
+  it("describes a short name from the loaded bucket, not another account's stale one", () => {
+    // The stale bucket also holds `xlsx`, which this session does not list,
+    // so only the other bucket — every skill of which is listed — counts.
+    const home = join(root, 'two-accounts-home');
+    const stale = syncedBucket(home, 'acct-aaa_user-old');
+    writeSkill(stale, 'pdf', 'description: Old account copy.');
+    writeSkill(stale, 'xlsx', 'description: Spreadsheets.');
+    writeSkill(syncedBucket(home, 'acct-bbb_user-new'), 'pdf', 'description: Current copy.');
+
+    const specs = withHome(home, () => describeSkills({ names: ['pdf'], plugins: [] }, root));
+    expect(specs).toEqual([{ name: 'pdf', summary: 'Current copy.', origin: 'synced' }]);
+  });
+
+  it("describes a full name from the loaded bucket, not another account's stale one", () => {
+    // Both accounts synced `pdf` and the stale bucket sorts first, but its
+    // `xlsx` is not listed, so the other bucket is the one this session runs.
+    const home = join(root, 'two-accounts-full-home');
+    const stale = syncedBucket(home, 'acct-aaa_user-old');
+    writeSkill(stale, 'pdf', 'description: Old account copy.');
+    writeSkill(stale, 'xlsx', 'description: Spreadsheets.');
+    writeSkill(syncedBucket(home, 'acct-bbb_user-new'), 'pdf', 'description: Current copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['anthropic-skills:pdf'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:pdf', summary: 'Current copy.', origin: 'synced' },
+    ]);
+  });
+
+  it('does not count a stale bucket as loaded because a local skill shares its names', () => {
+    // A loaded bucket's `deploy` would be listed as `anthropic-skills:deploy`
+    // beside the local one, so `deploy` alone shows the bucket is stale and
+    // `/simplify` is the built-in.
+    const home = join(root, 'stale-shadowed-home');
+    writeSkill(join(home, '.claude', 'skills'), 'deploy', 'description: Local deploy.');
+    const bucket = syncedBucket(home, 'acct-jjj_user-000');
+    writeSkill(bucket, 'deploy', 'description: Stale deploy.');
+    writeSkill(bucket, 'simplify', 'description: Stale synced copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['deploy', 'simplify'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'deploy', summary: 'Local deploy.', origin: 'user' },
+      { name: 'simplify', origin: 'builtin' },
+    ]);
   });
 
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
