@@ -136,7 +136,7 @@ export class ClaudeAdapter implements AgentAdapter {
       '--permission-mode',
       opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
       '--append-system-prompt',
-      buildBridgeSystemPrompt(this.botIdentity),
+      buildBridgeSystemPrompt(this.botIdentity, opts.bridgeContext),
     ];
     if (opts.sessionId) args.push('--resume', opts.sessionId);
     if (opts.model) args.push('--model', opts.model);

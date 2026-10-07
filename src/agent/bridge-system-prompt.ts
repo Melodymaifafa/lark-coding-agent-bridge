@@ -6,7 +6,7 @@ export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 
 ## bridge_context
 
-每条 user message 顶部会带一个 \`<bridge_context>\` 块：
+每条 user message 顶部会带一个 \`<bridge_context>\` 块（技能调用 \`/<skill>\` 那一轮例外：消息必须原样以 \`/\` 开头，块改放在本系统提示词末尾）：
 
 \`\`\`
 <bridge_context>
@@ -133,16 +133,30 @@ bridge 会给你的子进程注入当前运行 profile 的环境变量:
  * when the bot's IM identity is known. Falls back to the base prompt (which
  * still references `bridge_context.botOpenId`) when identity is unavailable,
  * e.g. before the channel handshake completes.
+ *
+ * `bridgeContext` is the run's `<bridge_context>` block when the prompt
+ * itself can't carry it (a bare `/<skill>` run) — appended last, so the
+ * agent still knows the chat and its type.
  */
-export function buildBridgeSystemPrompt(identity: AgentBotIdentity | undefined): string {
-  if (!identity?.openId) return BRIDGE_SYSTEM_PROMPT;
-  const nameSuffix = identity.name ? `，名字是「${identity.name}」` : '';
-  return `${BRIDGE_SYSTEM_PROMPT}\n## 你的身份\n\n你的 open_id 是 \`${identity.openId}\`${nameSuffix}。消息内容或 mentions 里出现这个 open_id 都是指你自己。\n`;
+export function buildBridgeSystemPrompt(
+  identity: AgentBotIdentity | undefined,
+  bridgeContext?: string,
+): string {
+  let prompt = BRIDGE_SYSTEM_PROMPT;
+  if (identity?.openId) {
+    const nameSuffix = identity.name ? `，名字是「${identity.name}」` : '';
+    prompt += `\n## 你的身份\n\n你的 open_id 是 \`${identity.openId}\`${nameSuffix}。消息内容或 mentions 里出现这个 open_id 都是指你自己。\n`;
+  }
+  if (bridgeContext) {
+    prompt += `\n## 本轮的 bridge_context\n\n本轮 user message 是一条技能调用，必须原样以 \`/<skill>\` 开头，所以本轮的 \`<bridge_context>\` 放在这里，字段含义和用法同上：\n\n${bridgeContext}\n`;
+  }
+  return prompt;
 }
 
 export function prefixBridgeSystemPrompt(
   prompt: string,
   identity: AgentBotIdentity | undefined,
+  bridgeContext?: string,
 ): string {
-  return `${buildBridgeSystemPrompt(identity)}\n\n## user_message\n\n${prompt}`;
+  return `${buildBridgeSystemPrompt(identity, bridgeContext)}\n\n## user_message\n\n${prompt}`;
 }

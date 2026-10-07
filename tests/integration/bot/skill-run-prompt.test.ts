@@ -57,7 +57,8 @@ afterEach(async () => {
 /**
  * Claude Code only treats `/<skill>` as an invocation at the very start of
  * its prompt, so a `/skills` run click must reach the agent bare — not
- * wrapped in `<bridge_context>` / `<user_input>` like ordinary chat.
+ * wrapped in `<bridge_context>` / `<user_input>` like ordinary chat. Its
+ * bridge_context still reaches the agent, out of band.
  */
 describe('/skills run click → agent prompt', () => {
   it('sends the skill to the agent as the bare slash prompt', async () => {
@@ -67,6 +68,34 @@ describe('/skills run click → agent prompt', () => {
     await waitFor(() => h.agent.runOptions.length === 1);
 
     expect(h.agent.runOptions[0]?.prompt).toBe('/handoff');
+  });
+
+  // Skills send cards to `chat_id` and may only start OAuth in p2p, so they
+  // need the same chat / sender context an ordinary message carries.
+  it('hands the run its bridge_context alongside the bare prompt', async () => {
+    const h = await startHarness();
+
+    await h.click('handoff');
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const context = readSection(h.agent.runOptions[0]?.bridgeContext ?? '', 'bridge_context');
+    expect(context).toMatchObject({
+      chatId: 'oc_chat',
+      chatType: 'group',
+      senderId: 'ou_user',
+      botOpenId: 'ou_bot',
+      source: 'im',
+    });
+  });
+
+  it('gives an ordinary message no out-of-band bridge_context', async () => {
+    const h = await startHarness();
+
+    await h.channel.handlers.message?.(message('om_text', '@Bridge 先看下这个'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    expect(h.agent.runOptions[0]?.bridgeContext).toBeUndefined();
+    expect(h.agent.runOptions[0]?.prompt).toContain('<bridge_context>');
   });
 
   it('runs a click on its own turn, after messages queued ahead of it', async () => {
@@ -245,6 +274,12 @@ function message(messageId: string, content: string): NormalizedMessage {
     mentionedBot: true,
     createTime: 1760000001000,
   } as unknown as NormalizedMessage;
+}
+
+function readSection(prompt: string, tag: string): unknown {
+  const match = prompt.match(new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`));
+  if (!match) throw new Error(`missing section ${tag}`);
+  return JSON.parse(match[1] ?? 'null') as unknown;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {

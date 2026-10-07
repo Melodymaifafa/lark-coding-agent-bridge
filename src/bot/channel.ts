@@ -8,6 +8,8 @@ import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import {
   buildAgentPrompt,
+  promptSection,
+  type BridgePromptContext,
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
@@ -684,6 +686,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
+  // A skill run's prompt is the bare `/<skill>`, so its bridge_context goes
+  // to the system prompt instead: the skill still needs the chat id to send
+  // cards, and the chat type to keep OAuth out of group chats.
+  const bridgeContext = isSkillRunMessage(firstMsg)
+    ? promptSection('bridge_context', promptContext(firstMsg, batch, channel.botIdentity))
+    : undefined;
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
   // For topic groups: thread the reply so it lands in the same topic as the
@@ -728,6 +736,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scopeId: scope,
     scope: scopeContext,
     prompt,
+    bridgeContext,
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -1203,6 +1212,7 @@ function buildPrompt(
   if (!first) return '';
   // Claude Code only recognises `/<skill>` at the very start of the prompt;
   // wrapped in `<user_input>` it is just chat text the model may ignore.
+  // Its bridge_context rides in the system prompt (see `runAgentBatch`).
   if (isSkillRunMessage(first)) return first.content;
 
   const fileKeys = batch.flatMap((m) => m.resources.map((r) => r.fileKey));
@@ -1224,28 +1234,36 @@ function buildPrompt(
         ? '请看下面的附件。'
         : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
 
-  const senderType = senderTypeOf(first);
-  const mentions = mergeMentions(batch);
-
   return buildAgentPrompt({
-    context: {
-      chatId: first.chatId,
-      chatType: first.chatType,
-      senderId: first.senderId,
-      ...(first.senderName ? { senderName: first.senderName } : {}),
-      ...(senderType ? { senderType } : {}),
-      ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
-      ...(mentions.length > 0 ? { mentions } : {}),
-      ...(first.threadId ? { threadId: first.threadId } : {}),
-      messageIds: batch.map((m) => m.messageId),
-      source: 'im',
-    },
+    context: promptContext(first, batch, botIdentity),
     instructions: BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
     quotedMessages: quotes.map(toPromptQuote),
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),
   });
+}
+
+/** The batch's `<bridge_context>`: which chat, who sent it, and who you are. */
+function promptContext(
+  first: NormalizedMessage,
+  batch: NormalizedMessage[],
+  botIdentity?: { openId: string; name?: string },
+): BridgePromptContext {
+  const senderType = senderTypeOf(first);
+  const mentions = mergeMentions(batch);
+  return {
+    chatId: first.chatId,
+    chatType: first.chatType,
+    senderId: first.senderId,
+    ...(first.senderName ? { senderName: first.senderName } : {}),
+    ...(senderType ? { senderType } : {}),
+    ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
+    ...(first.threadId ? { threadId: first.threadId } : {}),
+    messageIds: batch.map((m) => m.messageId),
+    source: 'im',
+  };
 }
 
 /**

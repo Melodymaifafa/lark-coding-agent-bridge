@@ -62,6 +62,12 @@ export interface AgentRunOptions {
   sandbox?: CodexSandboxMode;
   permissionMode?: ClaudePermissionMode;
   /**
+   * The run's `<bridge_context>` block when `prompt` must reach the agent
+   * verbatim (a `/skills` run click is the bare `/<skill>`) and so can't
+   * carry it at the top as usual. Adapters add it to the system prompt.
+   */
+  bridgeContext?: string;
+  /**
    * Grace period (ms) between SIGTERM and SIGKILL when stop() is called on
    * the returned run. Lets the agent (and any subprocess it spawned, e.g.
    * lark-cli mid-OAuth) clean up before the kernel reaps the tree.
