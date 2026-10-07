@@ -14,8 +14,9 @@
  * skills are compiled into the CLI binary and have no `SKILL.md` on disk —
  * they keep their name and carry `origin: 'builtin'` with no summary, so the
  * card can say so rather than silently showing a blank line. Skills synced
- * from the user's account are reported under a namespace that is no plugin
- * (`anthropic-skills:pdf`) and read from `~/.claude/skills/synced/`.
+ * from the user's account are reported under their short name (`pdf`), or
+ * under a namespace that is no plugin (`anthropic-skills:pdf`) when another
+ * command has that name, and read from `~/.claude/skills/synced/`.
  */
 import type { NormalizedMessage } from '@larksuite/channel';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
@@ -124,7 +125,10 @@ const SUMMARY_MAX_CHARS = 110;
 export function describeSkills(listing: AgentSkillListing, cwd: string): SkillSpec[] {
   const roots = projectRoots(cwd);
   const lookup = skillLookup();
-  const specs = listing.names.map((name) => describeSkill(name, listing.plugins, roots, lookup));
+  const listed = new Set(listing.names);
+  const specs = listing.names.map((name) =>
+    describeSkill(name, listing.plugins, roots, lookup, listed),
+  );
   specs.sort((a, b) => a.name.localeCompare(b.name));
   return specs;
 }
@@ -134,6 +138,7 @@ function describeSkill(
   plugins: readonly AgentPluginRef[],
   roots: readonly string[],
   lookup: SkillLookup,
+  listed: ReadonlySet<string>,
 ): SkillSpec {
   const sep = name.indexOf(':');
   if (sep > 0) {
@@ -183,6 +188,13 @@ function describeSkill(
   // A skill beats a same-named legacy command file, so commands come last.
   const command = findCommand(name, roots);
   if (command) return { name, ...command };
+  // A synced skill no other command claims is listed under its short name
+  // (Claude Code v2.1.281+). While its full name is listed too, some other
+  // command — a built-in one, say — owns the short name.
+  if (!listed.has(`${SYNCED_SKILL_NAMESPACE}:${name}`)) {
+    const synced = findSyncedSkill(name);
+    if (synced) return { name, ...synced, origin: 'synced' };
+  }
   // No SKILL.md or command file anywhere the bridge can reach: a skill
   // Claude Code ships inside its own binary.
   return { name, origin: 'builtin' };
@@ -217,14 +229,15 @@ function readCommandFile(commandsDir: string, name: string): SkillFound | undefi
 }
 
 /**
- * Summary for an account-synced skill invoked as `anthropic-skills:<bare>`.
- * Each sync bucket is a directory named after account ids, so all of them are
- * searched rather than any one name being hardcoded; a zero-byte
- * `.bucket-<ids>` marker sits beside them and is skipped. The skill's own
- * `SKILL.md` wins; a bucket's `manifest.json` — the catalog of what the
- * account holds — covers a skill whose files have not been pulled down.
- * Undefined when no bucket has the skill's folder or lists it, so a plugin
- * named after the namespace can still describe its own skill.
+ * Summary for an account-synced skill invoked as `anthropic-skills:<bare>`,
+ * or as plain `<bare>` while no other command uses that name. Each sync
+ * bucket is a directory named after account ids, so all of them are searched
+ * rather than any one name being hardcoded; a zero-byte `.bucket-<ids>`
+ * marker sits beside them and is skipped. The skill's own `SKILL.md` wins; a
+ * bucket's `manifest.json` — the catalog of what the account holds — covers
+ * a skill whose files have not been pulled down. Undefined when no bucket has
+ * the skill's folder or lists it, so a plugin named after the namespace can
+ * still describe its own skill and a short name can still be a built-in.
  */
 function findSyncedSkill(bare: string): SkillFound | undefined {
   const synced = join(homedir(), '.claude', 'skills', 'synced');

@@ -360,6 +360,46 @@ describe('agent skill registry', () => {
     ]);
   });
 
+  it('describes a synced skill listed under its short name, not as a built-in', () => {
+    // Claude Code v2.1.281+ lists a synced skill as plain `pdf` while no
+    // other command uses that name.
+    const home = join(root, 'short-name-home');
+    writeSkill(syncedBucket(home, 'acct-fff_user-666'), 'pdf', 'description: Work with PDF files.');
+
+    const specs = withHome(home, () => describeSkills({ names: ['pdf'], plugins: [] }, root));
+    expect(specs).toEqual([{ name: 'pdf', summary: 'Work with PDF files.', origin: 'synced' }]);
+  });
+
+  it('leaves the short name to the local skill that shadows a synced namesake', () => {
+    // The local skill keeps `/deploy`; the synced one runs only by its full name.
+    const home = join(root, 'shadowed-home');
+    writeSkill(join(home, '.claude', 'skills'), 'deploy', 'description: Local deploy.');
+    writeSkill(syncedBucket(home, 'acct-ggg_user-777'), 'deploy', 'description: Synced deploy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['deploy', 'anthropic-skills:deploy'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:deploy', summary: 'Synced deploy.', origin: 'synced' },
+      { name: 'deploy', summary: 'Local deploy.', origin: 'user' },
+    ]);
+  });
+
+  it('keeps a built-in short name built-in when a synced namesake is listed in full', () => {
+    // A built-in owns `/simplify`, so the synced copy is listed only as
+    // `anthropic-skills:simplify` and the short name must not borrow its text.
+    const home = join(root, 'builtin-shadow-home');
+    writeSkill(syncedBucket(home, 'acct-hhh_user-888'), 'simplify', 'description: Synced copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills({ names: ['simplify', 'anthropic-skills:simplify'], plugins: [] }, root),
+    );
+    expect(specs).toEqual([
+      { name: 'anthropic-skills:simplify', summary: 'Synced copy.', origin: 'synced' },
+      { name: 'simplify', origin: 'builtin' },
+    ]);
+  });
+
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
     // Claude Code compiles its own skills into the CLI binary, so there is
     // nothing to read. The skill must still be listed — dropping it would
