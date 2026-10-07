@@ -124,6 +124,86 @@ describe('agent skill registry', () => {
     ]);
   });
 
+  it('describes legacy command files, nested ones by their `:` path', () => {
+    // Claude Code still loads `.claude/commands/*.md` as skills, and every
+    // subdirectory adds a `:` segment to the name.
+    const repo = join(root, 'cmds');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    const commands = join(repo, '.claude', 'commands');
+    mkdirSync(join(commands, 'frontend', 'mobile'), { recursive: true });
+    writeFileSync(join(commands, 'ship-it.md'), '---\ndescription: Ship it.\n---\n\nbody\n');
+    writeFileSync(
+      join(commands, 'frontend', 'mobile', 'component.md'),
+      '---\ndescription: Scaffold a mobile component.\n---\n\nbody\n',
+    );
+    writeFileSync(join(commands, 'bare-note.md'), 'No frontmatter at all.\n');
+    const cwd = join(repo, 'packages', 'app');
+    mkdirSync(cwd, { recursive: true });
+
+    const specs = describeSkills(
+      { names: ['ship-it', 'frontend:mobile:component', 'bare-note'], plugins: [] },
+      cwd,
+    );
+    expect(specs).toEqual([
+      { name: 'bare-note', origin: 'project' },
+      {
+        name: 'frontend:mobile:component',
+        summary: 'Scaffold a mobile component.',
+        origin: 'project',
+      },
+      { name: 'ship-it', summary: 'Ship it.', origin: 'project' },
+    ]);
+  });
+
+  it('describes a skill over a same-named legacy command file', () => {
+    const cwd = join(root, 'both');
+    writeSkill(join(cwd, '.claude', 'skills'), 'tidy-up', 'description: Skill version.');
+    mkdirSync(join(cwd, '.claude', 'commands'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.claude', 'commands', 'tidy-up.md'),
+      '---\ndescription: Command version.\n---\n',
+    );
+
+    const [spec] = describeSkills({ names: ['tidy-up'], plugins: [] }, cwd);
+    expect(spec).toEqual({ name: 'tidy-up', summary: 'Skill version.', origin: 'project' });
+  });
+
+  it('resolves a plugin command file', () => {
+    const pluginPath = join(root, 'plugins', 'ops');
+    mkdirSync(join(pluginPath, 'commands'), { recursive: true });
+    writeFileSync(
+      join(pluginPath, 'commands', 'rollback.md'),
+      '---\ndescription: Roll back.\n---\n',
+    );
+
+    const [spec] = describeSkills(
+      { names: ['ops:rollback'], plugins: [{ name: 'ops', path: pluginPath }] },
+      root,
+    );
+    expect(spec).toEqual({
+      name: 'ops:rollback',
+      summary: 'Roll back.',
+      plugin: 'ops',
+      origin: 'plugin',
+    });
+  });
+
+  it("falls back to the main checkout's skills in a linked worktree without its own", () => {
+    // Claude Code stops at the worktree root, then loads the main
+    // checkout's project skills when the worktree has none.
+    const main = join(root, 'main');
+    const ownGitDir = join(main, '.git', 'worktrees', 'feature');
+    mkdirSync(ownGitDir, { recursive: true });
+    writeFileSync(join(ownGitDir, 'commondir'), '../..\n');
+    writeSkill(join(main, '.claude', 'skills'), 'lint-all', 'description: Lint everything.');
+    const worktree = join(root, 'feature');
+    mkdirSync(join(worktree, 'src'), { recursive: true });
+    writeFileSync(join(worktree, '.git'), `gitdir: ${ownGitDir}\n`);
+
+    const [spec] = describeSkills({ names: ['lint-all'], plugins: [] }, join(worktree, 'src'));
+    expect(spec).toEqual({ name: 'lint-all', summary: 'Lint everything.', origin: 'project' });
+  });
+
   it('keeps a skill with no SKILL.md on disk, marked built-in and summary-less', () => {
     // Claude Code compiles its own skills into the CLI binary, so there is
     // nothing to read. The skill must still be listed — dropping it would

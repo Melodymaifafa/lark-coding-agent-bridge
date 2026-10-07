@@ -9,14 +9,15 @@
  *
  * Names come from the agent itself (Claude Code's stream-json `system/init`
  * event carries a `skills` array); one-line descriptions are read from each
- * skill's `SKILL.md` frontmatter. Claude Code's built-in skills are compiled
- * into the CLI binary and have no `SKILL.md` on disk — they keep their name
- * and carry `origin: 'builtin'` with no summary, so the card can say so
- * rather than silently showing a blank line.
+ * skill's `SKILL.md` frontmatter, or from a legacy `.claude/commands/*.md`
+ * file, which Claude Code still loads as a skill. Claude Code's built-in
+ * skills are compiled into the CLI binary and have no `SKILL.md` on disk —
+ * they keep their name and carry `origin: 'builtin'` with no summary, so the
+ * card can say so rather than silently showing a blank line.
  */
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { AgentPluginRef, AgentSkillListing } from '../agent/types';
 
 /** Where a skill's definition lives. Drives the label shown on the card. */
@@ -88,7 +89,10 @@ function describeSkill(
     const bare = name.slice(sep + 1);
     const owners = plugins.filter((p) => p.name === prefix);
     for (const p of owners) {
-      const summary = lookup(join(p.path, 'skills'), bare);
+      // A plugin's `commands/*.md` files are skills too.
+      const summary =
+        lookup(join(p.path, 'skills'), bare) ??
+        readCommandFile(join(p.path, 'commands'), bare)?.summary;
       if (summary !== undefined) return { name, summary, plugin: prefix, origin: 'plugin' };
     }
     if (owners.length === 0) {
@@ -99,6 +103,10 @@ function describeSkill(
         readSkillFile(join(root, prefix, '.claude', 'skills', bare, 'SKILL.md'))?.summary,
       );
       if (summary !== undefined) return { name, summary, origin: 'project' };
+      // Or a legacy command in a subdirectory: `frontend:component` is
+      // `.claude/commands/frontend/component.md`.
+      const command = findCommand(name, roots);
+      if (command) return { name, ...command };
       // Plugin names never contain a slash.
       if (prefix.includes('/')) return { name, origin: 'project' };
     }
@@ -112,16 +120,52 @@ function describeSkill(
     lookup(join(root, '.claude', 'skills'), name),
   );
   if (projectSummary !== undefined) return { name, summary: projectSummary, origin: 'project' };
-  // No SKILL.md anywhere the bridge can reach: a skill Claude Code ships
-  // inside its own binary.
+  // A skill beats a same-named legacy command file, so commands come last.
+  const command = findCommand(name, roots);
+  if (command) return { name, ...command };
+  // No SKILL.md or command file anywhere the bridge can reach: a skill
+  // Claude Code ships inside its own binary.
   return { name, origin: 'builtin' };
+}
+
+/**
+ * The legacy command file invoked as `name`, personal before project like
+ * skills. Found even without a description — it is a real command, so it
+ * must not read as built-in.
+ */
+function findCommand(
+  name: string,
+  roots: readonly string[],
+): { summary?: string; origin: 'user' | 'project' } | undefined {
+  const personal = readCommandFile(join(homedir(), '.claude', 'commands'), name);
+  if (personal) return { ...personal, origin: 'user' };
+  for (const root of roots) {
+    const project = readCommandFile(join(root, '.claude', 'commands'), name);
+    if (project) return { ...project, origin: 'project' };
+  }
+  return undefined;
+}
+
+/**
+ * Read the command file invoked as `name` from one `commands` directory.
+ * Its name is its path there with each `/` turned into `:` —
+ * `frontend/component.md` is `frontend:component` — and command files take
+ * no frontmatter `name`, so the path alone locates it.
+ */
+function readCommandFile(commandsDir: string, name: string): { summary?: string } | undefined {
+  const path = `${join(commandsDir, ...name.split(':'))}.md`;
+  if (!existsSync(path)) return undefined;
+  const summary = readSkillFile(path)?.summary;
+  return summary !== undefined ? { summary } : {};
 }
 
 /**
  * Directories whose `.claude/skills` hold project skills for `cwd`: Claude
  * Code loads them from cwd and every parent up to the repository root, so a
  * cwd of `packages/frontend` still sees the repo root's skills. Nearest
- * first. Outside a git repo only cwd itself counts.
+ * first. Outside a git repo only cwd itself counts. A linked git worktree
+ * whose root has no `.claude/skills` loads the main checkout's instead, so
+ * that checkout comes last.
  */
 function projectRoots(cwd: string): string[] {
   const start = resolve(cwd);
@@ -129,10 +173,35 @@ function projectRoots(cwd: string): string[] {
   let dir = start;
   for (;;) {
     roots.push(dir);
-    if (existsSync(join(dir, '.git'))) return roots;
+    if (existsSync(join(dir, '.git'))) {
+      if (!existsSync(join(dir, '.claude', 'skills'))) {
+        const main = mainCheckoutOf(dir);
+        if (main && main !== dir) roots.push(main);
+      }
+      return roots;
+    }
     const parent = dirname(dir);
     if (parent === dir) return [start];
     dir = parent;
+  }
+}
+
+/**
+ * Main checkout of the linked git worktree rooted at `root`. A linked
+ * worktree's `.git` is a file pointing at its own gitdir, whose `commondir`
+ * names the main checkout's `.git`. Undefined for a normal checkout (`.git`
+ * is a directory), a submodule (no `commondir`), or a bare main repository.
+ */
+function mainCheckoutOf(root: string): string | undefined {
+  try {
+    const pointer = /^gitdir:[ \t]*(.+)$/m.exec(readFileSync(join(root, '.git'), 'utf8'));
+    const gitDir = pointer?.[1]?.trim();
+    if (!gitDir) return undefined;
+    const ownDir = resolve(root, gitDir);
+    const commonDir = resolve(ownDir, readFileSync(join(ownDir, 'commondir'), 'utf8').trim());
+    return basename(commonDir) === '.git' ? dirname(commonDir) : undefined;
+  } catch {
+    return undefined;
   }
 }
 
