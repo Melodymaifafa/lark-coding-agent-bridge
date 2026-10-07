@@ -247,6 +247,15 @@ async function createHarness(
     ...(opts.skills ? { skills: opts.skills } : {}),
   });
   const cwd = await realpath(tmp.workspace);
+  // Skill resolution reads the home directory, and a personal skill beats a
+  // project one. Without an empty home, a developer who has `handoff` in
+  // their own `~/.claude/skills` sees that description instead of the
+  // fixture's and the test fails on their machine only.
+  const home = join(tmp.root, 'home');
+  await mkdir(home, { recursive: true });
+  const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
   const profileConfig = appConfig(cwd);
   const configPath = join(tmp.root, 'config.json');
   await saveRootConfig(createRootConfig('claude', profileConfig), configPath);
@@ -266,6 +275,10 @@ async function createHarness(
   workspaces.setCwd('chat-1', cwd);
 
   cleanups.push(async () => {
+    for (const [key, value] of Object.entries(savedHome)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     await Promise.all([sessions.flush(), workspaces.flush()]);
     await tmp.cleanup();
   });
