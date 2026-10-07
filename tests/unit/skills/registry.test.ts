@@ -360,6 +360,36 @@ describe('agent skill registry', () => {
     ]);
   });
 
+  it('describes the plugin copy over a stale synced namesake', () => {
+    // An API-key session loads no synced skills, though an earlier signed-in
+    // session's `pdf` stays on disk. Its unlisted `xlsx` shows the bucket is
+    // not loaded, so `/anthropic-skills:pdf` runs the plugin's skill.
+    const home = join(root, 'stale-plugin-home');
+    const bucket = syncedBucket(home, 'acct-kkk_user-111');
+    writeSkill(bucket, 'pdf', 'description: Stale synced copy.');
+    writeSkill(bucket, 'xlsx', 'description: Spreadsheets.');
+    const pluginPath = join(root, 'plugins', 'anthropic-skills');
+    writeSkill(join(pluginPath, 'skills'), 'pdf', 'description: Plugin copy.');
+
+    const specs = withHome(home, () =>
+      describeSkills(
+        {
+          names: ['anthropic-skills:pdf'],
+          plugins: [{ name: 'anthropic-skills', path: pluginPath }],
+        },
+        root,
+      ),
+    );
+    expect(specs).toEqual([
+      {
+        name: 'anthropic-skills:pdf',
+        summary: 'Plugin copy.',
+        plugin: 'anthropic-skills',
+        origin: 'plugin',
+      },
+    ]);
+  });
+
   it('describes a synced skill listed under its short name, not as a built-in', () => {
     // Claude Code v2.1.281+ lists a synced skill as plain `pdf` while no
     // other command uses that name.

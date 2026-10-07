@@ -34,7 +34,7 @@ export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin' | 'synced';
  * that — so its skills are read from `~/.claude/skills/synced/` instead. A
  * real plugin by this name still loads, but Claude Code runs the synced skill
  * when both have one by the same name, so the plugin copy is described only
- * when no synced namesake exists.
+ * when this session loaded no synced namesake.
  */
 const SYNCED_SKILL_NAMESPACE = 'anthropic-skills';
 
@@ -149,9 +149,8 @@ function describeSkill(
     // The reserved full name runs the synced skill even when a plugin by
     // that name has a namesake, so the card must describe the synced copy —
     // the one this session loaded, not another account's stale namesake.
-    // Every bucket is the fallback for when none reads as loaded.
     if (prefix === SYNCED_SKILL_NAMESPACE) {
-      const synced = findSyncedSkill(bare, loadedBuckets) ?? findSyncedSkill(bare);
+      const synced = findSyncedSkill(bare, loadedBuckets);
       if (synced) return { name, ...synced, origin: 'synced' };
     }
     const owners = plugins.filter((p) => p.name === prefix);
@@ -160,6 +159,14 @@ function describeSkill(
       const found =
         lookup(join(p.path, 'skills'), bare) ?? readCommandFile(join(p.path, 'commands'), bare);
       if (found) return { name, ...found, plugin: prefix, origin: 'plugin' };
+    }
+    // A listed full name that no loaded bucket or plugin supplies can only
+    // be synced, so every bucket is the fallback. Only now: while a plugin
+    // has the skill, a bucket that reads as not loaded is a stale copy and
+    // the plugin's is the one that runs.
+    if (prefix === SYNCED_SKILL_NAMESPACE) {
+      const synced = findSyncedSkill(bare);
+      if (synced) return { name, ...synced, origin: 'synced' };
     }
     if (owners.length === 0) {
       // Not a plugin: a skill synced from the account, even with nothing
