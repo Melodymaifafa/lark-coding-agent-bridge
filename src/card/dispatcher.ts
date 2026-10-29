@@ -119,7 +119,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
   // `/skills` card → "▸ 运行 /<skill>". A skill is the AGENT's, not a bridge
   // command, so there is no handler to call: the click has to reach the
-  // agent as an explicit `/<skill>` invocation. Queue it on the scope —
+  // agent as an explicit `/<skill>` invocation (`$<skill>` for Codex, where
+  // `/` does nothing). Queue it on the scope —
   // same debounce, same run policy — marked so the batch runner sends it
   // as the bare prompt (see SKILL_RUN_CONTENT_TYPE).
   if (cmd === SKILL_RUN_CMD) {
@@ -152,7 +153,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     const run: SkillRunMessage = {
       ...makeFakeMsg(deps.evt, threadId),
       chatType: mode === 'p2p' ? 'p2p' : 'group',
-      content: `/${skill}`,
+      content: `${deps.agent.id === 'codex' ? '$' : '/'}${skill}`,
       rawContentType: SKILL_RUN_CONTENT_TYPE,
       listedFor,
     };

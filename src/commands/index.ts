@@ -867,12 +867,13 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 
 /**
  * `/skills [keyword]` — list the AGENT's skills (Claude Code `/skill-name`
- * entries), not the bridge's own commands. Names come from the agent
- * itself; a keyword matches names and descriptions, name hits listed first.
+ * entries, Codex `$skill-name` ones), not the bridge's own commands. Names
+ * come from the agent itself; a keyword matches names and descriptions,
+ * name hits listed first.
  *
- * Three outcomes are kept apart on purpose: the agent has no skill
- * mechanism, the lookup failed, and the real list. An empty card must never
- * be ambiguous between "none" and "couldn't ask".
+ * Four outcomes are kept apart on purpose: the agent has no skill
+ * mechanism, the lookup failed, none are installed, and the real list. An
+ * empty card must never be ambiguous between "none" and "couldn't ask".
  */
 async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
   const agentName = ctx.agent.displayName;
@@ -926,6 +927,12 @@ async function handleSkills(args: string, ctx: CommandContext): Promise<void> {
       );
       return;
     }
+  }
+  // A list the adapter read from disk (Codex) is complete, so empty really
+  // is "none installed" — unlike Claude Code's init list, see below.
+  if (catalog.skills.length === 0 && catalog.searched) {
+    await send(skillsCard({ status: 'empty', agentName, searched: catalog.searched }));
+    return;
   }
   if (catalog.skills.length === 0) {
     await send(

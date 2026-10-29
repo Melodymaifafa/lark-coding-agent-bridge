@@ -9,8 +9,8 @@ import type {
 
 /**
  * How a fake agent answers `listSkills`. Absent = the adapter has no
- * `listSkills` method at all, which is how a skill-less agent (Codex)
- * looks to `/skills`.
+ * `listSkills` method at all, which is how a skill-less agent looks to
+ * `/skills`.
  */
 export type FakeSkillSource =
   | AgentSkillListing

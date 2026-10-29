@@ -38,6 +38,16 @@ describe('/skills card run button', () => {
     expect(queued[0]?.chatType).toBe('group');
   });
 
+  it('invokes the skill as `$<skill>` under Codex, which ignores `/<skill>`', async () => {
+    const h = await createHarness({ agentId: 'codex' });
+
+    await h.dispatch({ cmd: 'skills.run', arg: 'imagegen', cwd: h.cwd });
+
+    const queued = h.pending.cancel('oc_group');
+    expect(queued[0]?.content).toBe('$imagegen');
+    expect(queued[0]?.rawContentType).toBe(SKILL_RUN_CONTENT_TYPE);
+  });
+
   it('accepts a plugin-namespaced skill name', async () => {
     const h = await createHarness();
 
@@ -167,7 +177,7 @@ interface Harness {
 }
 
 async function createHarness(
-  opts: { allowedChats?: string[]; operatorId?: string } = {},
+  opts: { allowedChats?: string[]; operatorId?: string; agentId?: string } = {},
 ): Promise<Harness> {
   const tmp = await createTmpProfile('skills-run-callback-');
   const channel = createFakeChannel();
@@ -175,7 +185,7 @@ async function createHarness(
   const workspaces = new WorkspaceStore(`${tmp.profile}/workspaces.json`);
   workspaces.setCwd('oc_group', tmp.workspace);
   const activeRuns = new ActiveRuns();
-  const agent = new FakeAgentAdapter();
+  const agent = new FakeAgentAdapter(opts.agentId ? { id: opts.agentId } : {});
   const pending = new PendingQueue(60_000, () => {});
   const profileConfig = createDefaultProfileConfig({
     agentKind: 'claude',

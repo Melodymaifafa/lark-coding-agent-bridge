@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { join } from 'node:path';
@@ -14,9 +15,11 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunOptions,
+  AgentSkillListing,
 } from '../types';
 import { buildCodexArgs } from './argv';
 import { CodexJsonlTranslator, type CodexFinishReason } from './jsonl';
+import { listCodexSkills } from './skills';
 
 export interface CodexAdapterOptions {
   binary: string;
@@ -88,6 +91,21 @@ export class CodexAdapter implements AgentAdapter {
     }
   }
 
+  /**
+   * Codex's skills in `cwd`, read from disk under the same `CODEX_HOME` its
+   * runs get — Codex has no event that reports them.
+   */
+  async listSkills(cwd: string): Promise<AgentSkillListing> {
+    const home = this.codexHomeOverride() ?? (process.env.CODEX_HOME || join(homedir(), '.codex'));
+    return listCodexSkills(cwd, home);
+  }
+
+  /** `CODEX_HOME` this profile sets for its runs; undefined inherits the bridge's. */
+  private codexHomeOverride(): string | undefined {
+    if (this.codexHome) return this.codexHome;
+    return this.inheritCodexHome ? undefined : join(this.profileStateDir, 'codex-home');
+  }
+
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for CodexAdapter.run');
@@ -102,11 +120,8 @@ export class CodexAdapter implements AgentAdapter {
       ignoreRules: this.ignoreRules,
     });
     const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
-    if (this.codexHome) {
-      envOverrides.CODEX_HOME = this.codexHome;
-    } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
-    }
+    const codexHome = this.codexHomeOverride();
+    if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(process.env, envOverrides),
