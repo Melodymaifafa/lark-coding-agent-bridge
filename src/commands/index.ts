@@ -1627,7 +1627,7 @@ async function handleInvite(args: string, ctx: CommandContext): Promise<void> {
     const list = new Set(ctx.controls.profileConfig.access.allowedChats);
     let knownChats = ctx.controls.knownChats ?? [];
     if (knownChats.length === 0) {
-      knownChats = await fetchKnownChats(ctx.channel);
+      knownChats = await fetchKnownChats(ctx.channel, ctx.controls.cfg.accounts.app.id);
       ctx.controls.knownChats = knownChats;
     }
     let added = 0;
@@ -1885,7 +1885,7 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
 async function showConfigForm(ctx: CommandContext): Promise<void> {
   await Promise.all([
     ctx.controls.refreshOwner(ctx.channel).catch(() => {}),
-    fetchKnownChats(ctx.channel)
+    fetchKnownChats(ctx.channel, ctx.controls.cfg.accounts.app.id)
       .then((chats) => {
         if (chats.length > 0) ctx.controls.knownChats = chats;
       })
