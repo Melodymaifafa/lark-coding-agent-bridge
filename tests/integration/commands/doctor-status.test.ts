@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { ProcessPool } from '../../../src/bot/process-pool.js';
+import { resetMissingScopesForTest, warnMissingScopesOnce } from '../../../src/bot/lark-permission.js';
+import { log } from '../../../src/core/logger.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema.js';
 import { RunExecutor } from '../../../src/runtime/run-executor.js';
@@ -29,6 +31,8 @@ const cleanups: Array<() => Promise<void>> = [];
 
 describe('/status and /doctor diagnostics', () => {
   afterEach(async () => {
+    resetMissingScopesForTest();
+    vi.restoreAllMocks();
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
@@ -53,6 +57,28 @@ describe('/status and /doctor diagnostics', () => {
     expect(status).toContain('permission');
     expect(status).toContain('plan');
     expect(status).not.toContain('bypassPermissions');
+  });
+
+  it('lists the Feishu scopes the bot was denied for', async () => {
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    warnMissingScopesOnce(['im:chat:readonly', 'im:chat', 'im:chat:read'], 'im.v1.chat.get');
+    warnMissingScopesOnce(['im:message', 'im:message.reactions:write_only'], 'reactions');
+    const h = await createHarness({ configuredWorkspace: true });
+
+    await expect(h.run('/status')).resolves.toBe(true);
+
+    const status = JSON.stringify(lastContent(h.channel));
+    expect(status).toContain('缺少的飞书权限');
+    expect(status).toContain('`im:chat:readonly` 或 `im:chat` 或 `im:chat:read`；`im:message`');
+    expect(status).toContain('im:message.reactions:write_only');
+  });
+
+  it('shows no missing-scope line when nothing was denied', async () => {
+    const h = await createHarness({ configuredWorkspace: true });
+
+    await expect(h.run('/status')).resolves.toBe(true);
+
+    expect(JSON.stringify(lastContent(h.channel))).not.toContain('缺少的飞书权限');
   });
 
   it('runs only self-checks when no cwd is selected', async () => {

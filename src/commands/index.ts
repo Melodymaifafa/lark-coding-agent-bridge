@@ -92,6 +92,7 @@ import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
+import { getMissingScopes } from '../bot/lark-permission';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 
 export interface Controls {
@@ -857,6 +858,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
     queue: ctx.processPool?.snapshot(),
     ownerState: formatOwnerState(ctx),
+    missingScopes: getMissingScopes(),
     scope: ctx.scope,
     chatMode: ctx.chatMode,
   });

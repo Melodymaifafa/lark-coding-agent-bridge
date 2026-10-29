@@ -69,6 +69,7 @@ import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
+import { isPermissionDenied, missingScopes, warnMissingScopesOnce } from './lark-permission';
 import type { AppPaths } from '../config/app-paths';
 
 const DEBOUNCE_MS = 600;
@@ -130,7 +131,7 @@ export function shouldSuppressSdkErrorLog(args: unknown[]): boolean {
   return args.some(isSuppressedSdkMessage);
 }
 
-function buildQuietLogger(): {
+export function buildQuietLogger(): {
   error: (...m: unknown[]) => void;
   warn: (...m: unknown[]) => void;
   info: (...m: unknown[]) => void;
@@ -140,6 +141,13 @@ function buildQuietLogger(): {
   return {
     error: (...args: unknown[]) => {
       if (shouldSuppressSdkErrorLog(args)) return;
+      // A missing scope fails the same way on every call (startup owner and
+      // chat-list reads included): one line per scope set, not one per call.
+      const denied = args.flat().find(isPermissionDenied);
+      if (denied) {
+        warnMissingScopesOnce(missingScopes(denied), urlFromObj(denied) ?? 'unknown');
+        return;
+      }
       log.warn('sdk', 'error', { args: stringifyArgs(args) });
     },
     warn: (...args: unknown[]) => log.warn('sdk', 'warn', { args: stringifyArgs(args) }),
@@ -264,7 +272,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info('flush', 'start', { scope, batchSize: batch.length });
       try {
-        const mode = await chatModeCache.resolve(channel, firstMsg.chatId);
+        const mode = await chatModeCache.resolve(channel, firstMsg.chatId, firstMsg.chatType);
         await runAgentBatch({
           channel,
           executor,
@@ -523,7 +531,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
-  const chatMode = await chatModeCache.resolve(channel, msg.chatId);
+  const chatMode = await chatModeCache.resolve(channel, msg.chatId, msg.chatType);
   const scope = chatMode === 'topic' && msg.threadId
     ? `${msg.chatId}:${msg.threadId}`
     : msg.chatId;
