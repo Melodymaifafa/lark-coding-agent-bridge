@@ -242,12 +242,13 @@ export function commandMatchCard(partial: string, matches: CommandSpec[]): objec
 
 /**
  * Agent-skill card (`/skills`). Distinct from `commandMatchCard`, which
- * lists the BRIDGE's own commands: this one lists what Claude Code can do
- * in the current cwd. Three shapes, because "no skills" and "couldn't ask"
+ * lists the BRIDGE's own commands: this one lists what the agent can do
+ * in the current cwd. Four shapes, because "no skills" and "couldn't ask"
  * must never look the same:
  *
  * - `ok` — the real list, capped so the card stays readable.
- * - `unsupported` — the running agent has no skill mechanism (Codex).
+ * - `unsupported` — the running agent has no skill mechanism.
+ * - `empty` — the agent read its skill directories and found none (Codex).
  * - `failed` — the lookup itself broke; says so, with the reason.
  */
 export type SkillsCardInput =
@@ -270,6 +271,7 @@ export type SkillsCardInput =
       agentName: string;
     }
   | { status: 'unsupported'; agentName: string }
+  | { status: 'empty'; agentName: string; searched: readonly string[] }
   | { status: 'failed'; agentName: string; reason: string };
 
 /** Entries rendered per card. Past this, the user filters instead. */
@@ -281,7 +283,13 @@ const SKILLS_CARD_TITLE = '🧠 Agent 技能';
 const SKILL_ORIGIN_LABEL: Partial<Record<SkillSpec['origin'], string>> = {
   builtin: ' _(内置)_',
   synced: ' _(账号同步)_',
+  codex: ' _(Codex)_',
 };
+
+/** What the user types to run `spec`: Codex invokes skills as `$name`. */
+function skillInvocation(spec: SkillSpec): string {
+  return `${spec.origin === 'codex' ? '$' : '/'}${spec.name}`;
+}
 
 function skillLine(spec: SkillSpec): string {
   const origin = SKILL_ORIGIN_LABEL[spec.origin] ?? '';
@@ -292,7 +300,7 @@ function skillLine(spec: SkillSpec): string {
       ? '_无说明（Claude Code 内置技能，说明不在本机文件里）_'
       : '_无说明_';
   const summary = spec.summary ? escapeMd(spec.summary) : missing;
-  return `\`/${escapeMd(spec.name)}\`${origin} — ${summary}`;
+  return `\`${escapeMd(skillInvocation(spec))}\`${origin} — ${summary}`;
 }
 
 export function skillsCard(input: SkillsCardInput): object {
@@ -301,6 +309,14 @@ export function skillsCard(input: SkillsCardInput): object {
       divMd(
         `当前 agent 是 **${escapeMd(input.agentName)}**，它没有 skills 机制，所以没有可列的技能。`,
       ),
+    ]);
+  }
+  if (input.status === 'empty') {
+    return shell(SKILLS_CARD_TITLE, [
+      divMd(`**${escapeMd(input.agentName)}** 当前没有可用技能。`),
+      divMd(`找过这些目录：\n${input.searched.map((dir) => `\`${escapeCode(dir)}\``).join('\n')}`),
+      HR,
+      divMd('每个技能是其中一个目录下的文件夹，里面放一个写了 `description` 的 `SKILL.md`。装好后再发 `/skills`。'),
     ]);
   }
   if (input.status === 'failed') {
@@ -337,7 +353,7 @@ export function skillsCard(input: SkillsCardInput): object {
     elements.push(
       actions([
         {
-          text: `▸ 运行 /${spec.name}`,
+          text: `▸ 运行 ${skillInvocation(spec)}`,
           // The skill set is per cwd and per session: carry the ones this
           // list was built for so a click after `/cd`, `/new` or `/resume`
           // can't run a different same-named skill.

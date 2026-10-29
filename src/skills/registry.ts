@@ -17,6 +17,10 @@
  * from the user's account are reported under their short name (`pdf`), or
  * under a namespace that is no plugin (`anthropic-skills:pdf`) when another
  * command has that name, and read from `~/.claude/skills/synced/`.
+ *
+ * Codex reports no skill list on any event, so its adapter reads its skills
+ * from disk itself and hands them over already described (see
+ * `src/agent/codex/skills.ts`); they carry `origin: 'codex'`.
  */
 import type { NormalizedMessage } from '@larksuite/channel';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
@@ -25,7 +29,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import type { AgentPluginRef, AgentSkillListing } from '../agent/types';
 
 /** Where a skill's definition lives. Drives the label shown on the card. */
-export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin' | 'synced';
+export type SkillOrigin = 'project' | 'user' | 'plugin' | 'builtin' | 'synced' | 'codex';
 
 /**
  * Namespace Claude Code gives skills synced from the user's Anthropic
@@ -40,8 +44,9 @@ const SYNCED_SKILL_NAMESPACE = 'anthropic-skills';
 
 export interface SkillSpec {
   /**
-   * Exactly what the user types after the slash: `handoff`, `vercel:deploy`,
-   * or a nested monorepo skill like `apps/web:deploy`.
+   * Exactly what the user types after the slash (after `$` for Codex):
+   * `handoff`, `vercel:deploy`, or a nested monorepo skill like
+   * `apps/web:deploy`.
    */
   name: string;
   /** One-line description from `SKILL.md` frontmatter. Absent for built-ins. */
@@ -60,6 +65,12 @@ export interface SkillCatalog {
   agentId: string;
   /** Claude session the listing belongs to; absent for a fresh session. */
   sessionId?: string;
+  /**
+   * Directories the adapter read the skills from (Codex). Present means the
+   * list is complete, so an empty one is "none installed", not a failed
+   * lookup.
+   */
+  searched?: readonly string[];
   capturedAt: number;
 }
 
@@ -502,7 +513,7 @@ function renamedSkills(skillsDir: string): Map<string, SkillFound> {
  * with no frontmatter, or a field that isn't there just leaves that field
  * absent — "no summary available", never "no such skill".
  */
-function readSkillFile(path: string): { name?: string; summary?: string } | undefined {
+export function readSkillFile(path: string): { name?: string; summary?: string } | undefined {
   if (!existsSync(path)) return undefined;
   let text: string;
   try {
@@ -635,10 +646,11 @@ export function rememberSkillCatalog(
   listing: AgentSkillListing,
 ): SkillCatalog {
   const catalog: SkillCatalog = {
-    skills: describeSkills(listing, cwd),
+    skills: listing.scanned ? listing.scanned.skills : describeSkills(listing, cwd),
     cwd,
     agentId,
     ...(sessionId ? { sessionId } : {}),
+    ...(listing.scanned ? { searched: listing.scanned.searched } : {}),
     capturedAt: Date.now(),
   };
   const key = cacheKey(agentId, cwd, sessionId);

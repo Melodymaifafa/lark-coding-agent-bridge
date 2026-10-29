@@ -1,5 +1,6 @@
 import type { AgentAvailability } from './preflight';
 import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissions';
+import type { SkillSpec } from '../skills/registry';
 
 export type { ClaudePermissionMode } from '../config/permissions';
 
@@ -17,6 +18,14 @@ export interface AgentPluginRef {
 export interface AgentSkillListing {
   names: string[];
   plugins: AgentPluginRef[];
+  /**
+   * Set by an agent whose adapter reads its skills from disk (Codex has no
+   * init event to report them): the skills already described, sorted by
+   * name, and every directory searched. Such a list is complete — empty
+   * means none are installed, where Claude Code's empty init list means
+   * its skills failed to load.
+   */
+  scanned?: { skills: SkillSpec[]; searched: string[] };
 }
 
 export type AgentEvent =
