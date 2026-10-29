@@ -68,7 +68,7 @@ import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
-import { fetchKnownChats } from './lark-info';
+import { startKnownChatsRefreshTimer } from './lark-info';
 import { isPermissionDenied, missingScopes, warnMissingScopesOnce } from './lark-permission';
 import type { AppPaths } from '../config/app-paths';
 
@@ -459,26 +459,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       if (disconnectResult.status === 'rejected') {
         throw disconnectResult.reason;
       }
-    },
-  };
-}
-
-function startKnownChatsRefreshTimer(
-  channel: LarkChannel,
-  controls: Controls,
-): { stop(): void } {
-  const intervalMs = 30 * 60 * 1000;
-  const refresh = async (): Promise<void> => {
-    const chats = await fetchKnownChats(channel);
-    if (chats.length > 0) {
-      controls.knownChats = chats;
-    }
-  };
-  void refresh();
-  const timer = setInterval(() => void refresh(), intervalMs);
-  return {
-    stop() {
-      clearInterval(timer);
     },
   };
 }
