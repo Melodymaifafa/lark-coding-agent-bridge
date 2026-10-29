@@ -10,6 +10,7 @@ import {
 } from '../../../src/bot/lark-info.js';
 
 const THREE_HOURS = 3 * 60 * 60 * 1000;
+const APP_ID = 'cli_x';
 
 /** What node-sdk throws when im.v1.chat.list is denied, in the real bridge log's shape. */
 function chatListDenied(): Error {
@@ -65,7 +66,7 @@ describe('known chats refresh when the app lacks the chat-read scope', () => {
     const { channel, listChats } = fakeChannel(async () => {
       throw chatListDenied();
     });
-    const refresh = startKnownChatsRefreshTimer(channel, {});
+    const refresh = startKnownChatsRefreshTimer(channel, APP_ID, {});
 
     await vi.advanceTimersByTimeAsync(THREE_HOURS);
 
@@ -89,7 +90,7 @@ describe('known chats refresh when the app lacks the chat-read scope', () => {
     const { channel, listChats } = fakeChannel(async () => {
       throw timeoutError();
     });
-    const refresh = startKnownChatsRefreshTimer(channel, {});
+    const refresh = startKnownChatsRefreshTimer(channel, APP_ID, {});
 
     await vi.advanceTimersByTimeAsync(THREE_HOURS);
 
@@ -110,11 +111,11 @@ describe('known chats refresh when the app lacks the chat-read scope', () => {
     const { channel, listChats } = fakeChannel(async () => {
       throw chatListDenied();
     });
-    startKnownChatsRefreshTimer(channel, controls);
+    startKnownChatsRefreshTimer(channel, APP_ID, controls);
     await vi.advanceTimersByTimeAsync(THREE_HOURS);
 
     // /config and /invite all group fetch on demand.
-    await expect(fetchKnownChats(channel)).resolves.toEqual([]);
+    await expect(fetchKnownChats(channel, APP_ID)).resolves.toEqual([]);
 
     expect(listChats).toHaveBeenCalledTimes(1);
     expect(chatFailures(warn)).toHaveLength(1);
@@ -125,16 +126,38 @@ describe('known chats refresh when the app lacks the chat-read scope', () => {
     const denied = fakeChannel(async () => {
       throw chatListDenied();
     });
-    await fetchKnownChats(denied.channel);
+    await fetchKnownChats(denied.channel, APP_ID);
 
     resetKnownChatsDenialForTest(); // a new process starts with no memory
     const granted = fakeChannel(async () => [{ id: 'oc_1', name: 'team' }]);
     const controls: { knownChats?: KnownChat[] } = {};
-    const refresh = startKnownChatsRefreshTimer(granted.channel, controls);
+    const refresh = startKnownChatsRefreshTimer(granted.channel, APP_ID, controls);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(granted.listChats).toHaveBeenCalledTimes(1);
     expect(controls.knownChats).toEqual([{ id: 'oc_1', name: 'team' }]);
+    expect(vi.getTimerCount()).toBe(1);
+    refresh.stop();
+  });
+
+  it('still lists chats after /account change to an app that has the scope', async () => {
+    const denied = fakeChannel(async () => {
+      throw chatListDenied();
+    });
+    startKnownChatsRefreshTimer(denied.channel, APP_ID, {});
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Same process, fresh controls and channel for the new app.
+    const granted = fakeChannel(async () => [{ id: 'oc_1', name: 'team' }]);
+    const controls: { knownChats?: KnownChat[] } = {};
+    const refresh = startKnownChatsRefreshTimer(granted.channel, 'cli_y', controls);
+    await vi.advanceTimersByTimeAsync(KNOWN_CHATS_REFRESH_INTERVAL_MS);
+
+    expect(granted.listChats).toHaveBeenCalledTimes(2);
+    expect(controls.knownChats).toEqual([{ id: 'oc_1', name: 'team' }]);
+    await expect(fetchKnownChats(granted.channel, 'cli_y')).resolves.toEqual([
+      { id: 'oc_1', name: 'team' },
+    ]);
     expect(vi.getTimerCount()).toBe(1);
     refresh.stop();
   });

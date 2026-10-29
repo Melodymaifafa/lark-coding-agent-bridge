@@ -398,7 +398,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
   });
   await ownerRefresh.start();
-  const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  const knownChatsRefresh = startKnownChatsRefreshTimer(channel, cfg.accounts.app.id, controls);
 
   const identity = channel.botIdentity;
   // Late-bind the bot's own IM identity into the agent adapter so the system
