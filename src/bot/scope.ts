@@ -1,4 +1,4 @@
-import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type { ChatType, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import type { ChatModeCache } from './chat-mode-cache';
 
 /**
@@ -19,8 +19,9 @@ export async function scopeFor(
   chatId: string,
   threadId: string | undefined,
   cache: ChatModeCache,
+  chatType?: ChatType,
 ): Promise<string> {
-  const mode = await cache.resolve(channel, chatId);
+  const mode = await cache.resolve(channel, chatId, chatType);
   if (mode === 'topic' && threadId) {
     return `${chatId}:${threadId}`;
   }
@@ -33,5 +34,5 @@ export async function scopeForMessage(
   msg: NormalizedMessage,
   cache: ChatModeCache,
 ): Promise<string> {
-  return scopeFor(channel, msg.chatId, msg.threadId, cache);
+  return scopeFor(channel, msg.chatId, msg.threadId, cache, msg.chatType);
 }

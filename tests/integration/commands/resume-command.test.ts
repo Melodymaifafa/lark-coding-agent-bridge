@@ -1,13 +1,15 @@
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CardActionEvent, NormalizedMessage } from '@larksuite/channel';
+import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../../../src/agent/capability.js';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
-import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
+import { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
+import { resetMissingScopesForTest } from '../../../src/bot/lark-permission.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
 import { handleCardAction } from '../../../src/card/dispatcher.js';
 import { tryHandleCommand, type CommandContext, type Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig, type AgentKind, type ProfileConfig } from '../../../src/config/profile-schema.js';
+import { log } from '../../../src/core/logger.js';
 import { canUseDm } from '../../../src/policy/access.js';
 import { evaluateRunPolicy } from '../../../src/policy/run-policy.js';
 import { resolveWorkingDirectory } from '../../../src/policy/workspace.js';
@@ -40,6 +42,8 @@ const cleanups: Array<() => Promise<void>> = [];
 
 describe('agent-aware resume commands', () => {
   afterEach(async () => {
+    resetMissingScopesForTest();
+    vi.restoreAllMocks();
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
@@ -236,6 +240,34 @@ describe('agent-aware resume commands', () => {
     expect(rendered).toContain('私聊');
     expect(rendered).not.toContain('alpha prompt');
     expect(rendered).not.toContain('thread-alpha-secret');
+  });
+
+  it('lists Codex history in a DM even when the chat-mode lookup is denied', async () => {
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const h = await createHarness('codex');
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    const denied = Object.assign(new Error('Request failed with status code 400'), {
+      response: {
+        status: 400,
+        data: {
+          code: 99991672,
+          msg: 'Access denied. One of the following scopes is required: [im:chat:readonly, im:chat, im:chat:read].',
+        },
+      },
+    });
+    const lookup = {
+      getChatMode: async () => {
+        throw denied;
+      },
+    } as unknown as LarkChannel;
+    const msg = message('/resume');
+    const chatMode = await new ChatModeCache().resolve(lookup, msg.chatId, msg.chatType);
+
+    await expect(h.run('/resume', { chatMode })).resolves.toBe(true);
+
+    const rendered = lastContentString(h.channel);
+    expect(rendered).toContain('alpha prompt');
+    expect(rendered).not.toContain('群聊中不展示');
   });
 
   it('labels Codex status as session while reading the recorded thread id', async () => {

@@ -80,6 +80,8 @@ export interface StatusInfo {
   activeCommentScopes?: string[];
   queue?: { active: number; waiting: number; cap: number };
   ownerState: string;
+  /** Feishu scope sets the bot was denied for; granting any one per set fixes it. */
+  missingScopes?: string[][];
   /** Session scope (= chatId or chatId:threadId in topic groups). */
   scope: string;
   /** Chat mode — used to label scope. */
@@ -116,6 +118,13 @@ export function statusCard(info: StatusInfo): object {
       : []),
     `🚦 **queue**: ${queueLine}`,
     `👤 **owner API**: ${escapeMd(info.ownerState)}`,
+    ...(info.missingScopes && info.missingScopes.length > 0
+      ? [
+          `🔑 **缺少的飞书权限**: ${info.missingScopes
+            .map((anyOf) => anyOf.map((scope) => `\`${escapeCode(scope)}\``).join(' 或 '))
+            .join('；')}`,
+        ]
+      : []),
   ];
   return shell('📊 当前状态', [
     divMd(lines.join('\n')),
