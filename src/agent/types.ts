@@ -39,6 +39,7 @@ export type AgentEvent =
       skills?: AgentSkillListing;
     }
   | { type: 'text'; delta: string }
+  | { type: 'final_text'; content: string }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; id: string; output: string; isError: boolean }

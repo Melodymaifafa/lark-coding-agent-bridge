@@ -26,6 +26,7 @@ import {
   markInterrupted,
   reduce,
   type RunState,
+  withoutProgressText,
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
@@ -945,7 +946,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async () => {},
       );
-      const body = renderText(filterForPrefs(finalState));
+      const body = renderText(withoutProgressText(filterForPrefs(finalState)));
       if (body.trim()) {
         await workingAck.beforeReply();
         await channel.send(chatId, { markdown: body }, sendOpts);

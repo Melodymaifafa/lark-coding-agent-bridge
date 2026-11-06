@@ -19,6 +19,8 @@ export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_time
 
 export interface RunState {
   blocks: Block[];
+  /** The agent's last message of a completed turn. It is also the last text block. */
+  finalText?: string;
   reasoning: { content: string; active: boolean };
   footer: FooterStatus;
   terminal: Terminal;
@@ -61,6 +63,18 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         footer: 'streaming',
       };
     }
+
+    case 'final_text':
+      return {
+        ...state,
+        finalText: evt.content,
+        blocks: [
+          ...closeStreamingText(state.blocks),
+          { kind: 'text', content: evt.content, streaming: false },
+        ],
+        reasoning: { ...state.reasoning, active: false },
+        footer: 'streaming',
+      };
 
     case 'thinking': {
       return {
@@ -134,6 +148,22 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
     default:
       return state;
   }
+}
+
+/**
+ * For a reply posted once at the end of the run: the agent's progress lines
+ * are stale by then, so only its final answer stays. A run without a final
+ * answer (Claude, or a Codex turn that did not complete) keeps its text.
+ */
+export function withoutProgressText(state: RunState): RunState {
+  if (state.finalText === undefined) return state;
+  return {
+    ...state,
+    blocks: [
+      ...state.blocks.filter((b) => b.kind === 'tool'),
+      { kind: 'text', content: state.finalText, streaming: false },
+    ],
+  };
 }
 
 export function markInterrupted(state: RunState): RunState {

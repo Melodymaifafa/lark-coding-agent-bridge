@@ -2,6 +2,8 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CodexJsonlTranslator } from '../../../src/agent/codex/jsonl.js';
+import type { AgentEvent } from '../../../src/agent/types.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { log } from '../../../src/core/logger.js';
 import { SessionStore } from '../../../src/session/store.js';
@@ -68,6 +70,13 @@ interface FakeLarkChannel {
 }
 
 type StreamFn = FakeLarkChannel['stream'];
+
+// What Codex said on 2026-10-02 (session 01a0a8c9), shortened the same way as
+// the 2026-11-07 check-up evidence: two progress lines, then the answer.
+const PROGRESS_ONE = '我先看一下今天的题目卡和点击记录，确认你问的“默认值”具体指哪一个。';
+const PROGRESS_TWO =
+  '你已经点过「看答案」了，所以我直接说结论；我再核对一下现在 GitHub Action 的准确配置写法。';
+const ANSWER = '能改。更准确地说，是在 GitHub workflow 里显式覆盖默认模型。';
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -158,9 +167,219 @@ describe('markdown stream startup failures', () => {
   }, 10_000);
 });
 
+describe('Codex final reply', () => {
+  it.each([
+    {
+      name: 'messages only',
+      raw: [agentMessage(PROGRESS_ONE), agentMessage(PROGRESS_TWO), agentMessage(ANSWER)],
+    },
+    {
+      name: 'a command between messages, as in the real session',
+      raw: [
+        agentMessage(PROGRESS_ONE),
+        ...command('cmd-1'),
+        agentMessage(PROGRESS_TWO),
+        ...command('cmd-2'),
+        agentMessage(ANSWER),
+      ],
+    },
+  ])('sends only the answer in text mode: $name', async ({ raw }) => {
+    const h = await createHarness({
+      events: codexEvents([{ type: 'thread.started', thread_id: 't-1' }, ...raw]),
+      preferences: { messageReply: 'text', showToolCalls: false },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_answer', '默认值能改吗'));
+    await waitFor(() => h.channel.sent.length === 1);
+    await settle();
+
+    expect(h.channel.sent).toHaveLength(1);
+    expect(lastMarkdown(h.channel)).toBe(ANSWER);
+  });
+
+  it('sends the only message when Codex said one thing in text mode', async () => {
+    const h = await createHarness({
+      events: codexEvents([agentMessage(ANSWER)]),
+      preferences: { messageReply: 'text' },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_one', 'run'));
+    await waitFor(() => h.channel.sent.length === 1);
+    await settle();
+
+    expect(h.channel.sent).toHaveLength(1);
+    expect(lastMarkdown(h.channel)).toBe(ANSWER);
+  });
+
+  it('sends no empty message when Codex said nothing in text mode', async () => {
+    const h = await createHarness({
+      events: codexEvents([]),
+      preferences: { messageReply: 'text' },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_silent', 'run'));
+    await waitFor(() => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0);
+
+    expect(h.channel.sent).toEqual([]);
+  });
+
+  it('keeps tool lines but drops progress lines when tool calls are shown in text mode', async () => {
+    const h = await createHarness({
+      events: codexEvents([agentMessage(PROGRESS_ONE), ...command('cmd-1'), agentMessage(ANSWER)]),
+      preferences: { messageReply: 'text', showToolCalls: true },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_tools', 'run'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    const reply = lastMarkdown(h.channel);
+    expect(reply).toContain('> ');
+    expect(reply).toContain(ANSWER);
+    expect(reply).not.toContain(PROGRESS_ONE);
+  });
+
+  it('keeps what Codex said when the turn fails in text mode', async () => {
+    const h = await createHarness({
+      events: codexEvents([
+        agentMessage(PROGRESS_ONE),
+        { type: 'turn.failed', error: { message: 'model stopped' } },
+      ]),
+      preferences: { messageReply: 'text' },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_failed', 'run'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(lastMarkdown(h.channel)).toContain(PROGRESS_ONE);
+    expect(lastMarkdown(h.channel)).toContain('model stopped');
+  });
+
+  it('keeps every text event in text mode when the agent names no final answer', async () => {
+    // Claude's event shape: it never sends `final_text`.
+    const h = await createHarness({
+      events: [
+        { type: 'text', delta: 'first ' },
+        { type: 'text', delta: 'second' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      preferences: { messageReply: 'text' },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_claude', 'run'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(lastMarkdown(h.channel)).toBe('first second');
+  });
+
+  it('shows the answer in the one streaming card in card mode', async () => {
+    const cards: unknown[] = [];
+    const h = await createHarness({
+      events: codexEvents([agentMessage(PROGRESS_ONE), agentMessage(ANSWER)]),
+      preferences: { messageReply: 'card' },
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          card?: { producer?: (ctrl: { update(next: unknown): Promise<void> }) => Promise<void> };
+        }).card?.producer;
+        await producer?.({
+          update: vi.fn(async (next: unknown) => {
+            cards.push(next);
+          }),
+        });
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_card', 'run'));
+    await waitFor(() => JSON.stringify(cards.at(-1) ?? '').includes(ANSWER));
+    await settle();
+
+    expect(JSON.stringify(cards.at(-1))).toContain(PROGRESS_ONE);
+    expect(h.channel.sent).toEqual([]);
+  });
+
+  it('shows the answer in the one streaming message in markdown mode', async () => {
+    const contents: string[] = [];
+    const h = await createHarness({
+      events: codexEvents([agentMessage(PROGRESS_ONE), agentMessage(ANSWER)]),
+      preferences: { messageReply: 'markdown' },
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        await producer?.({
+          setContent: vi.fn(async (markdown: string) => {
+            contents.push(markdown);
+          }),
+        });
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_markdown', 'run'));
+    await waitFor(() => (contents.at(-1) ?? '').includes(ANSWER));
+    await settle();
+
+    expect(contents.at(-1)).toBe(`${PROGRESS_ONE}\n\n${ANSWER}`);
+    expect(h.channel.sent).toEqual([]);
+  });
+
+  it('still delivers the answer when the markdown stream fails to start', async () => {
+    vi.spyOn(log, 'fail').mockImplementation(() => {});
+    const h = await createHarness({
+      events: codexEvents([agentMessage(ANSWER)]),
+      preferences: { messageReply: 'markdown' },
+      stream: async () => {
+        throw new Error('stream failed');
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_stream_fail', 'run'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(lastMarkdown(h.channel)).toBe(ANSWER);
+  });
+});
+
+function agentMessage(text: string): Record<string, unknown> {
+  return { type: 'item.completed', item: { id: `msg-${text}`, type: 'agent_message', text } };
+}
+
+function command(id: string): Array<Record<string, unknown>> {
+  return [
+    { type: 'item.started', item: { id, type: 'command_execution', command: 'pwd' } },
+    {
+      type: 'item.completed',
+      item: { id, type: 'command_execution', output: '/repo\n', exit_code: 0 },
+    },
+  ];
+}
+
+/** Translates raw Codex lines the way the adapter does, ending the turn unless a line already did. */
+function codexEvents(raw: ReadonlyArray<Record<string, unknown>>): AgentEvent[] {
+  const translator = new CodexJsonlTranslator();
+  const events = raw.flatMap((line) => translator.translate(line));
+  return translator.terminalEmitted()
+    ? events
+    : [...events, ...translator.translate({ type: 'turn.completed' })];
+}
+
+/** Gives a duplicate reply time to fire before a test asserts there is none. */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 80));
+}
+
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
+  events?: readonly AgentEvent[];
+  preferences?: { messageReply?: 'card' | 'markdown' | 'text'; showToolCalls?: boolean };
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -187,6 +406,9 @@ async function createHarness(options: {
     codex: {
       binaryPath: '/usr/local/bin/codex',
     },
+    ...(options.preferences
+      ? { preferences: { ...options.preferences, messageReplyMigrated: true } }
+      : {}),
   });
   const profileConfig = {
     ...baseProfileConfig,
@@ -200,16 +422,18 @@ async function createHarness(options: {
   const agent = new FakeAgentAdapter({
     id: 'codex',
     displayName: 'Codex',
-    events: [
-      [
-        {
-          type: 'error',
-          message: 'codex exited with code 1: Error loading config.toml',
-          terminationReason: 'failed',
-        },
-      ],
-      [{ type: 'done', terminationReason: 'normal' }],
-    ],
+    events: options.events
+      ? [options.events]
+      : [
+          [
+            {
+              type: 'error',
+              message: 'codex exited with code 1: Error loading config.toml',
+              terminationReason: 'failed',
+            },
+          ],
+          [{ type: 'done', terminationReason: 'normal' }],
+        ],
   });
   const channel = createFakeLarkChannel(options);
   sdkMock.channel = channel;
