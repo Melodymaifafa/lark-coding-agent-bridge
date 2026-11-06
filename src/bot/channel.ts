@@ -67,7 +67,7 @@ import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
-import { addWorkingReaction, removeReaction } from './reaction';
+import { addWorkingReaction, removeReaction, sendWorkingAck } from './reaction';
 import { startKnownChatsRefreshTimer } from './lark-info';
 import { isPermissionDenied, missingScopes, warnMissingScopesOnce } from './lark-permission';
 import type { AppPaths } from '../config/app-paths';
@@ -826,9 +826,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
   // Add a "Typing" reaction to the triggering message as an instant ack, but
-  // never let that outbound API call block agent event draining.
+  // never let that outbound API call block agent event draining. If Feishu
+  // rejects the reaction, send a short text ack instead, unless the run has
+  // already ended: an ack after the final reply would be misleading.
+  let runEnded = false;
   const reactionPromise =
-    replyMode === 'card' ? undefined : addWorkingReaction(channel, lastMsg.messageId);
+    replyMode === 'card'
+      ? undefined
+      : addWorkingReaction(channel, lastMsg.messageId, () => {
+          if (runEnded) return;
+          void sendWorkingAck(channel, chatId, lastMsg.messageId, sendOpts);
+        });
 
   try {
     if (replyMode === 'card') {
@@ -939,6 +947,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
+    runEnded = true;
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }

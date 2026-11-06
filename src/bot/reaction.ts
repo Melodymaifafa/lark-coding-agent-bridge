@@ -1,5 +1,7 @@
-import type { LarkChannel } from '@larksuite/channel';
+import type { LarkChannel, SendOptions } from '@larksuite/channel';
 import { log } from '../core/logger';
+
+const WORKING_ACK_TEXT = '收到，正在处理…';
 
 /**
  * Add a "Typing" reaction (敲键盘) to a message to give text-mode users an
@@ -10,11 +12,13 @@ import { log } from '../core/logger';
  *
  * Returns the reaction id on success, undefined on any failure. Failures
  * are logged but never thrown — losing a decoration must not break the
- * actual reply flow.
+ * actual reply flow. `onFailure` lets the caller give the same cue another
+ * way, and must not throw.
  */
 export async function addWorkingReaction(
   channel: LarkChannel,
   messageId: string,
+  onFailure?: () => void,
 ): Promise<string | undefined> {
   try {
     const id = await channel.addReaction(messageId, 'Typing');
@@ -25,7 +29,27 @@ export async function addWorkingReaction(
       messageId,
       err: err instanceof Error ? err.message : String(err),
     });
+    onFailure?.();
     return undefined;
+  }
+}
+
+/** Send the text stand-in for a reaction that could not be added. Failures
+ * are logged but never thrown — the actual reply must still go out. */
+export async function sendWorkingAck(
+  channel: LarkChannel,
+  chatId: string,
+  messageId: string,
+  sendOpts: SendOptions,
+): Promise<void> {
+  try {
+    await channel.send(chatId, { text: WORKING_ACK_TEXT }, sendOpts);
+    log.info('reaction', 'ack-sent', { messageId });
+  } catch (err) {
+    log.warn('reaction', 'ack-send-failed', {
+      messageId,
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
