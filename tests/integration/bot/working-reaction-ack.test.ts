@@ -48,6 +48,8 @@ interface FakeLarkChannel {
   sent: SentMessage[];
   addReaction: ReturnType<typeof vi.fn>;
   removeReaction: ReturnType<typeof vi.fn>;
+  recallMessage: ReturnType<typeof vi.fn>;
+  stream: ReturnType<typeof vi.fn>;
   rawClient: {
     request: ReturnType<typeof vi.fn>;
     application: { v6: { application: { get: ReturnType<typeof vi.fn> } } };
@@ -58,21 +60,24 @@ interface FakeLarkChannel {
   disconnect(): Promise<void>;
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
-  send(chatId: string, content: SentMessage['content'], options?: unknown): Promise<void>;
-  stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
+  send(
+    chatId: string,
+    content: SentMessage['content'],
+    options?: unknown,
+  ): Promise<{ messageId: string }>;
 }
 
 /** Holds the agent's events back until `gate` resolves, so a test can look at a run in progress. */
 class GatedAgentAdapter extends FakeAgentAdapter {
   readonly #gate: Promise<void>;
 
-  constructor(gate: Promise<void>) {
+  constructor(gate: Promise<void>, text = ANSWER) {
     super({
       id: 'codex',
       displayName: 'Codex',
       events: [
         [
-          { type: 'text', delta: ANSWER },
+          ...(text ? [{ type: 'text' as const, delta: text }] : []),
           { type: 'done', terminationReason: 'normal' },
         ],
       ],
@@ -171,6 +176,121 @@ describe('text ack when the working reaction cannot be added', () => {
     });
   });
 
+  it.each(['text', 'markdown'] as const)(
+    'drains the agent while the ack is pending and sends the reply after it lands in %s mode',
+    async (reply) => {
+      const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+      const ack = deferred<void>();
+      const h = await startBridge({
+        reply,
+        addReaction: reject400,
+        send: async (content) => {
+          if (content.text === ACK_TEXT) await ack.promise;
+        },
+      });
+
+      await h.channel.handlers.message?.(dmMessage('om_first'));
+      await waitFor(() => info.mock.calls.some((call) => call[0] === 'card' && call[1] === 'final'));
+      await settle();
+
+      expect(h.channel.sent).toEqual([]);
+
+      ack.resolve();
+      await waitFor(() => replies(h.channel).length === 1);
+
+      expect(h.channel.sent.map((sent) => sent.content.text ?? 'reply')).toEqual([ACK_TEXT, 'reply']);
+      expect(h.channel.recallMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['text', 'markdown'] as const)(
+    'sends the reply after the grace period and recalls an ack that lands late in %s mode',
+    async (reply) => {
+      const ack = deferred<void>();
+      const h = await startBridge({
+        reply,
+        addReaction: reject400,
+        send: async (content) => {
+          if (content.text === ACK_TEXT) await ack.promise;
+        },
+      });
+
+      await h.channel.handlers.message?.(dmMessage('om_first'));
+      await waitFor(() => replies(h.channel).length === 1);
+
+      expect(acks(h.channel)).toEqual([]);
+
+      ack.resolve();
+      await waitFor(() => h.channel.recallMessage.mock.calls.length === 1);
+
+      expect(h.channel.recallMessage).toHaveBeenCalledWith('om_sent_1');
+    },
+  );
+
+  it('starts the streaming card only after the ack lands in markdown mode', async () => {
+    const gate = deferred<void>();
+    const ack = deferred<void>();
+    const h = await startBridge({
+      reply: 'markdown',
+      gate: gate.promise,
+      addReaction: reject400,
+      send: async (content) => {
+        if (content.text === ACK_TEXT) await ack.promise;
+      },
+    });
+
+    await h.channel.handlers.message?.(dmMessage('om_first'));
+    await waitFor(() => h.channel.addReaction.mock.calls.length === 1);
+    await settle();
+
+    expect(h.channel.stream).not.toHaveBeenCalled();
+
+    ack.resolve();
+    await waitFor(() => h.channel.stream.mock.calls.length === 1);
+
+    expect(acks(h.channel)).toHaveLength(1);
+    gate.resolve();
+    await waitFor(() => replies(h.channel).length === 1);
+  });
+
+  it('starts the streaming card without an ack once the reaction is added in markdown mode', async () => {
+    const gate = deferred<void>();
+    const h = await startBridge({
+      reply: 'markdown',
+      gate: gate.promise,
+      addReaction: async () => 'reaction_1',
+    });
+
+    await h.channel.handlers.message?.(dmMessage('om_first'));
+    await waitFor(() => h.channel.stream.mock.calls.length === 1);
+
+    expect(acks(h.channel)).toEqual([]);
+    gate.resolve();
+    await waitFor(() => replies(h.channel).length === 1);
+  });
+
+  it('sends the markdown reply once and starts no card when the run ends before the ack lands', async () => {
+    const ack = deferred<void>();
+    const h = await startBridge({
+      reply: 'markdown',
+      addReaction: reject400,
+      send: async (content) => {
+        if (content.text === ACK_TEXT) await ack.promise;
+      },
+    });
+
+    await h.channel.handlers.message?.(dmMessage('om_first'));
+    await waitFor(() => h.channel.addReaction.mock.calls.length === 1);
+    await settle();
+
+    ack.resolve();
+    await waitFor(() => replies(h.channel).length === 1);
+    await settle();
+
+    expect(replies(h.channel)).toHaveLength(1);
+    expect(h.channel.stream).not.toHaveBeenCalled();
+  });
+
   it('does not send the ack when the reaction fails after the run ended', async () => {
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
     const reaction = deferred<string>();
@@ -183,6 +303,23 @@ describe('text ack when the working reaction cannot be added', () => {
     await waitFor(() => warn.mock.calls.some((call) => call[1] === 'add-failed'));
 
     expect(acks(h.channel)).toEqual([]);
+  });
+
+  it('does not send the ack when the reaction fails after a run with nothing to reply', async () => {
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const reaction = deferred<string>();
+    const h = await startBridge({ reply: 'text', text: '', addReaction: () => reaction.promise });
+
+    await h.channel.handlers.message?.(dmMessage('om_first'));
+    await waitFor(() => info.mock.calls.some((call) => call[0] === 'card' && call[1] === 'final'));
+    await settle();
+
+    reaction.reject(new Error('Request failed with status code 400'));
+    await waitFor(() => warn.mock.calls.some((call) => call[1] === 'add-failed'));
+    await settle();
+
+    expect(h.channel.sent).toEqual([]);
   });
 
   it('adds no reaction and sends no ack in card mode', async () => {
@@ -204,6 +341,7 @@ async function startBridge(options: {
   reply: MessageReplyMode;
   addReaction: () => Promise<string>;
   gate?: Promise<void>;
+  text?: string;
   chatMode?: 'group' | 'topic';
   send?: (content: SentMessage['content']) => Promise<void>;
 }): Promise<{ channel: FakeLarkChannel }> {
@@ -248,7 +386,7 @@ async function startBridge(options: {
   });
   const bridge = await startChannel({
     cfg: profileConfig,
-    agent: new GatedAgentAdapter(options.gate ?? Promise.resolve()),
+    agent: new GatedAgentAdapter(options.gate ?? Promise.resolve(), options.text),
     sessions,
     workspaces,
     controls: {
@@ -274,12 +412,18 @@ function createFakeLarkChannel(options: {
 }): FakeLarkChannel {
   const handlers: MessageHandlerMap = {};
   const sent: SentMessage[] = [];
+  let sendCount = 0;
   return {
     handlers,
     sent,
     botIdentity: { openId: 'ou_bot', name: 'Bridge' },
     addReaction: vi.fn(options.addReaction),
     removeReaction: vi.fn(async () => {}),
+    recallMessage: vi.fn(async () => {}),
+    // Never starts the producer: a markdown or card run ends in the fallback `send`.
+    stream: vi.fn(async () => {
+      await new Promise<void>(() => {});
+    }),
     rawClient: {
       request: vi.fn(async () => ({ data: { items: [] } })),
       application: {
@@ -311,12 +455,10 @@ function createFakeLarkChannel(options: {
       return { state: 'connected', reconnectAttempts: 0 };
     },
     async send(chatId, content, sendOptions) {
+      const messageId = `om_sent_${++sendCount}`;
       await options.send?.(content);
       sent.push({ chatId, content, options: sendOptions });
-    },
-    // Never starts the producer: a markdown or card run ends in the fallback `send`.
-    async stream() {
-      await new Promise<void>(() => {});
+      return { messageId };
     },
   };
 }
@@ -377,6 +519,11 @@ function topicMessage(messageId: string): NormalizedMessage {
     replyToMessageId: 'om_topic_root',
     createTime: 1760000001000,
   } as unknown as NormalizedMessage;
+}
+
+/** Long enough for pending async work to show itself, well under the ack's grace period. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 100));
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void> {

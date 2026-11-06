@@ -67,7 +67,7 @@ import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
-import { addWorkingReaction, removeReaction, sendWorkingAck } from './reaction';
+import { addWorkingReaction, createWorkingAck, removeReaction } from './reaction';
 import { startKnownChatsRefreshTimer } from './lark-info';
 import { isPermissionDenied, missingScopes, warnMissingScopesOnce } from './lark-permission';
 import type { AppPaths } from '../config/app-paths';
@@ -827,16 +827,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // a first streamed token (markdown mode) or the whole run ends (text mode).
   // Add a "Typing" reaction to the triggering message as an instant ack, but
   // never let that outbound API call block agent event draining. If Feishu
-  // rejects the reaction, send a short text ack instead, unless the run has
-  // already ended: an ack after the final reply would be misleading.
-  let runEnded = false;
+  // rejects the reaction, send a short text ack instead. The reply waits for
+  // that ack, so it can't land under the reply.
+  const workingAck = createWorkingAck(channel, chatId, lastMsg.messageId, sendOpts);
   const reactionPromise =
     replyMode === 'card'
       ? undefined
-      : addWorkingReaction(channel, lastMsg.messageId, () => {
-          if (runEnded) return;
-          void sendWorkingAck(channel, chatId, lastMsg.messageId, sendOpts);
-        });
+      : addWorkingReaction(channel, lastMsg.messageId, workingAck.send);
 
   try {
     if (replyMode === 'card') {
@@ -889,6 +886,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
       let producerStarted = false;
+      let fallbackStarted = false;
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
       const renderDone = processAgentStream(
         handle,
@@ -903,17 +901,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }
         },
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          markdown: async (ctrl) => {
-            producerStarted = true;
-            markdownCtrl = ctrl;
-            await ctrl.setContent(renderText(filterForPrefs(latestState)));
-            await renderDone;
-          },
-        },
-        sendOpts,
+      // The streaming card is the reply's first message, so it waits for the
+      // reaction's outcome and the ack. Agent events keep draining meanwhile.
+      const streamDone = workingAck.beforeReply(reactionPromise).then(() =>
+        fallbackStarted
+          ? undefined
+          : channel.stream(
+              chatId,
+              {
+                markdown: async (ctrl) => {
+                  producerStarted = true;
+                  markdownCtrl = ctrl;
+                  await ctrl.setContent(renderText(filterForPrefs(latestState)));
+                  await renderDone;
+                },
+              },
+              sendOpts,
+            ),
       );
       await awaitRenderAwareStream({
         mode: replyMode,
@@ -921,8 +925,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         renderDone,
         producerStarted: () => producerStarted,
         fallback: async (state) => {
+          fallbackStarted = true;
           const body = renderText(filterForPrefs(state));
           if (body.trim()) {
+            await workingAck.beforeReply();
             await channel.send(chatId, { markdown: body }, sendOpts);
           }
         },
@@ -941,13 +947,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       );
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
+        await workingAck.beforeReply();
         await channel.send(chatId, { markdown: body }, sendOpts);
       }
     }
   } catch (err) {
     log.fail('stream', err);
   } finally {
-    runEnded = true;
+    workingAck.close();
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }
