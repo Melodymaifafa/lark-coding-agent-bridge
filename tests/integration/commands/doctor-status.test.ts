@@ -2,6 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
+import type { AgentEvent } from '../../../src/agent/types.js';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { ProcessPool } from '../../../src/bot/process-pool.js';
 import { resetMissingScopesForTest, warnMissingScopesOnce } from '../../../src/bot/lark-permission.js';
@@ -115,6 +116,20 @@ describe('/status and /doctor diagnostics', () => {
     expect(output).toContain('OK');
   });
 
+  it('reads the echo from a final answer as well as from text', async () => {
+    const h = await createHarness({
+      configuredWorkspace: true,
+      events: [
+        { type: 'final_text', content: 'OK' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+
+    await expect(h.run('/doctor')).resolves.toBe(true);
+
+    expect(lastStreamCardJson(h.channel)).toContain('agent echo check: OK');
+  });
+
   it('uses the profile default workspace when the chat has no bound cwd', async () => {
     const h = await createHarness({
       configuredWorkspace: true,
@@ -150,6 +165,7 @@ async function createHarness(options: {
   configuredWorkspace: boolean;
   bindWorkspace?: boolean;
   defaultWorkspace?: boolean;
+  events?: readonly AgentEvent[];
 }): Promise<Harness> {
   const tmp = await createTmpProfile('doctor-status-');
   const channel = createFakeChannel();
@@ -158,7 +174,9 @@ async function createHarness(options: {
   const activeRuns = new ActiveRuns();
   const pool = new ProcessPool(() => 1);
   const agent = new FakeAgentAdapter({
-    events: [[{ type: 'text', delta: 'OK' }, { type: 'done', terminationReason: 'normal' }]],
+    events: [
+      options.events ?? [{ type: 'text', delta: 'OK' }, { type: 'done', terminationReason: 'normal' }],
+    ],
   });
   const profileConfig = appConfig(options.configuredWorkspace ? tmp.workspace : undefined);
   if (options.defaultWorkspace) {
